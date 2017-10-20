@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/evergreen-ci/evergreen/model/admin"
@@ -259,4 +260,22 @@ func (c *communicatorImpl) GetCurrentUsersKeys(ctx context.Context) ([]model.API
 	}
 
 	return keys, nil
+}
+
+// TODO?: better name
+func (c *communicatorImpl) AddPublicKeyToCurrentUser(ctx context.Context, key model.APIPubKey) error {
+	info := requestInfo{
+		method:  post,
+		version: apiVersion2,
+		path:    "keys",
+	}
+
+	resp, err := c.request(ctx, info, key)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK || err != nil {
+		return errors.Wrap(err, "problem adding key")
+	}
+
+	return nil
 }
