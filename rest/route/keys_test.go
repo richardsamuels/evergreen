@@ -123,6 +123,7 @@ func TestPostHandlerKeyValidationEmptyNameAndKey(t *testing.T) {
 	key := model.APIPubKey{}
 	err := h.validatePublicKey(key)
 	assert.Error(err)
+
 	assert.Equal(err.Error(), "empty key or value")
 }
 
@@ -136,6 +137,7 @@ func TestPostHandlerKeyValidationWhiteSpaceAsName(t *testing.T) {
 	}
 	err := h.validatePublicKey(key)
 	assert.Error(err)
+
 	assert.Equal(err.Error(), "empty key or value")
 }
 
