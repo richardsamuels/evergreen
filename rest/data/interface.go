@@ -147,4 +147,8 @@ type Connector interface {
 	FindRecentTasks(int) ([]task.Task, *task.ResultCounts, error)
 	// GetHostStatsByDistro returns host stats broken down by distro
 	GetHostStatsByDistro() ([]host.StatsByDistro, error)
+
+	// AddPublicKey adds a public key to the provided user, and prevents
+	// duplicate names
+	AddPublicKey(*user.DBUser, string, string) error
 }

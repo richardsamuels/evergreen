@@ -1182,3 +1182,21 @@ Fetch Current User's SSH Public Keys
  Api-User and Api-Key headers) as an array of Key objects.
 
  If the user has no public keys, expect: []
+
+Add a Public Key to the Current User
+````````````````````````````````````
+
+::
+
+ POST /keys
+
+ Add a single public key to the current user (as determined by the
+ Api-User and Api-Key headers) as a Key object. The name and key objects
+ will be trimmed of surrounding whitespace
+
+ Both name and key must not be empty strings
+
+ If the key was succesfully inserted, the server will return HTTP status code
+ 200 OK
+
+ Any other status code indicates that the key was not added.
