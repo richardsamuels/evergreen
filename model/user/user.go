@@ -65,8 +65,8 @@ func (u *DBUser) GetPublicKey(keyname string) (string, error) {
 	return "", errors.Errorf("Unable to find public key '%v' for user '%v'", keyname, u.Username())
 }
 
-func (u *DBUser) AddPublicKey(name, value string) error {
-	return UpdateOne(ByIdWithoutKey(u.Id, name), InsertPublicKey(name, value))
+func (u *DBUser) AddPublicKey(keyName, keyValue string) error {
+	return UpdateOne(ByIdWithoutKey(u.Id, keyName), InsertPublicKey(keyName, keyValue))
 }
 
 func (u *DBUser) PublicKeys() []PubKey {
