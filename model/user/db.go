@@ -1,6 +1,9 @@
 package user
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/evergreen-ci/evergreen/db"
 	"github.com/mongodb/anser/bsonutil"
 	"gopkg.in/mgo.v2"
@@ -43,6 +46,13 @@ func ByIds(userIds ...string) db.Q {
 		IdKey: bson.M{
 			"$in": userIds,
 		},
+	})
+}
+
+func ByIdWithoutKey(userId, keyName string) db.Q {
+	return db.Query(bson.M{
+		IdKey: userId,
+		fmt.Sprintf("%s.%s", PubKeysKey, PubKeyNameKey): bson.M{"$ne": keyName},
 	})
 }
 
@@ -94,4 +104,16 @@ func UpsertOne(query interface{}, update interface{}) (*mgo.ChangeInfo, error) {
 		query,
 		update,
 	)
+}
+
+func InsertPublicKey(keyName, keyValue string) db.Q {
+	return db.Query(bson.M{
+		"$push": bson.M{
+			PubKeysKey: PubKey{
+				Name:      keyName,
+				Key:       keyValue,
+				CreatedAt: time.Now(),
+			},
+		},
+	})
 }
