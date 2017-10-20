@@ -1,6 +1,7 @@
 package user
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/evergreen-ci/evergreen/db"
@@ -66,7 +67,21 @@ func (u *DBUser) GetPublicKey(keyname string) (string, error) {
 }
 
 func (u *DBUser) AddPublicKey(keyName, keyValue string) error {
-	return UpdateOne(ByIdWithoutKey(u.Id, keyName), InsertPublicKey(keyName, keyValue))
+	userWithoutKey := bson.M{
+		IdKey: u.Id,
+		fmt.Sprintf("%s.%s", PubKeysKey, PubKeyNameKey): bson.M{"$ne": keyName},
+	}
+	update := bson.M{
+		"$push": bson.M{
+			PubKeysKey: PubKey{
+				Name:      keyName,
+				Key:       keyValue,
+				CreatedAt: time.Now(),
+			},
+		},
+	}
+
+	return UpdateOne(userWithoutKey, update)
 }
 
 func (u *DBUser) PublicKeys() []PubKey {

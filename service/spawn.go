@@ -117,8 +117,7 @@ func (uis *UIServer) requestNewHost(w http.ResponseWriter, r *http.Request) {
 
 	// save the supplied public key if needed
 	if putParams.SaveKey {
-		err := authedUser.AddPublicKey(putParams.KeyName, putParams.PublicKey)
-		if err != nil {
+		if err := authedUser.AddPublicKey(putParams.KeyName, putParams.PublicKey); err != nil {
 			uis.LoggedError(w, r, http.StatusInternalServerError, errors.Wrap(err, "Error saving public key"))
 			return
 		}
