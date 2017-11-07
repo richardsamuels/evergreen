@@ -251,6 +251,9 @@ func (c *communicatorImpl) GetCurrentUsersKeys(ctx context.Context) ([]model.API
 		return nil, errors.Wrap(client_err, "problem fetching keys list")
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, errors.Errorf("problem fetching keys list: API server returned status code: %d", resp.StatusCode)
+	}
 
 	keys := []model.APIPubKey{}
 
