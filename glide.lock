@@ -114,3 +114,7 @@ imports:
     version: f33e6637df2eccf076929f744c619fe33b2a5bd6
   - name: github.com/mongodb/amboy
     version: a214bdd82a05166c500b5bc8cb59bbc43d73952b
+  - name: github.com/google/go-github
+    version: 8c08f4fba5e05e0fd2821a5f80cf0cf643bd5314
+  - name: github.com/google/go-querystring
+    version: 53e6ce116135b80d037921a7fdd5138cf32d7a8a
