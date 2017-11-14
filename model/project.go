@@ -6,12 +6,12 @@ import (
 	"strings"
 
 	"github.com/evergreen-ci/evergreen"
-	"github.com/evergreen-ci/evergreen/db/bsonutil"
 	"github.com/evergreen-ci/evergreen/model/build"
 	"github.com/evergreen-ci/evergreen/model/distro"
 	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/evergreen-ci/evergreen/model/version"
 	"github.com/evergreen-ci/evergreen/util"
+	"github.com/mongodb/anser/bsonutil"
 	"github.com/pkg/errors"
 	ignore "github.com/sabhiram/go-git-ignore"
 )
@@ -181,8 +181,7 @@ type PluginCommandConf struct {
 	// variants.
 	Variants []string `yaml:"variants,omitempty" bson:"variants"`
 
-	// TimeoutSecs indicates the maximum duration the command is allowed to run
-	// for. If undefined, it is unbounded.
+	// TimeoutSecs indicates the maximum duration the command is allowed to run for.
 	TimeoutSecs int `yaml:"timeout_secs,omitempty" bson:"timeout_secs"`
 
 	// Params are used to supply configuratiion specific information.
@@ -429,7 +428,7 @@ func NewPatchTaskIdTable(proj *Project, v *version.Version, patchConfig TVPairSe
 		taskNamesForVariant := patchConfig.TaskNames(vt.Variant)
 		for _, t := range projBV.Tasks {
 			// create Ids for each task that can run on the variant and is requested by the patch.
-			if util.SliceContains(taskNamesForVariant, t.Name) {
+			if util.StringSliceContains(taskNamesForVariant, t.Name) {
 
 				rev := v.Revision
 				if v.Requester == evergreen.PatchVersionRequester {
@@ -546,7 +545,7 @@ func (p *Project) GetVariantsWithTask(taskName string) []string {
 
 // RunOnVariant returns true if the plugin command should run on variant; returns false otherwise
 func (p PluginCommandConf) RunOnVariant(variant string) bool {
-	return len(p.Variants) == 0 || util.SliceContains(p.Variants, variant)
+	return len(p.Variants) == 0 || util.StringSliceContains(p.Variants, variant)
 }
 
 // GetDisplayName returns the  display name of the plugin command. If none is

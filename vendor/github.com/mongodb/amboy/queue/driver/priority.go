@@ -1,10 +1,11 @@
 package driver
 
 import (
+	"context"
+
 	"github.com/mongodb/amboy"
 	"github.com/pkg/errors"
 	uuid "github.com/satori/go.uuid"
-	"golang.org/x/net/context"
 )
 
 ////////////////////////////////////////////////////////////////////////
@@ -69,9 +70,14 @@ func (p *Priority) Get(name string) (amboy.Job, error) {
 // storage. If the job is not tracked by the Driver, this operation is
 // an error.
 func (p *Priority) Save(j amboy.Job) error {
-	p.storage.Push(j)
+	p.storage.Save(j)
 
 	return nil
+}
+
+// Put saves a new job returning an error if that job already exists.
+func (p *Priority) Put(j amboy.Job) error {
+	return errors.WithStack(p.storage.Insert(j))
 }
 
 // SaveStatus persists only the status document in the job in the
@@ -96,10 +102,29 @@ func (p *Priority) Jobs() <-chan amboy.Job {
 	return p.storage.Contents()
 }
 
+// JobStats returns job status documents for all jobs in the storage layer.
+func (p *Priority) JobStats(ctx context.Context) <-chan amboy.JobStatusInfo {
+	out := make(chan amboy.JobStatusInfo)
+	go func() {
+		defer close(out)
+		for job := range p.storage.Contents() {
+			if ctx.Err() != nil {
+				return
+
+			}
+			status := job.Status()
+			status.ID = job.ID()
+			out <- status
+		}
+	}()
+
+	return out
+}
+
 // Next returns the next, highest priority Job from the Driver's
 // backing storage. If there are no queued jobs, the job object is
 // nil.
-func (p *Priority) Next() amboy.Job {
+func (p *Priority) Next(_ context.Context) amboy.Job {
 	j := p.storage.Pop()
 
 	if j == nil || j.Status().Completed {

@@ -14,7 +14,7 @@ func TestQueryExecution(t *testing.T) {
 		FieldTwo   int    `bson:"two"`
 		FieldThree string `bson:"three"`
 	}
-	SetGlobalSessionProvider(SessionFactoryFromConfig(dbUtilsTestConf))
+
 	collection := "test_query_collection"
 
 	Convey("With a db and collection", t, func() {

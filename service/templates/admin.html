@@ -101,6 +101,12 @@ Admin Settings
                   <label>Site-wide banner:</label>
                   <input type="text" id="txtBanner" ng-model="Settings.banner" placeholder="Enter banner text here">
                 </md-input-container>
+                <md-input-container class="control">
+                  <label>Banner style:</label>
+                  <md-select ng-model="Settings.banner_theme">
+                    <md-option ng-repeat="t in ValidThemes" value="[[t]]">[[t]]</md-option>
+                  </md-select>
+                </md-input-container>
               </md-card-content>
 
             </md-card>
@@ -138,6 +144,8 @@ Admin Settings
           </table>
         </md-card-content>
         <md-card-footer class="squeezeTop">
+            <md-checkbox ng-model="restartRed" style="top: 10px">Red Tasks</md-checkbox>
+            <md-checkbox ng-model="restartPurple" style="top: 10px">Purple Tasks</md-checkbox>
           <md-button class="md-raised" ng-disabled="disableSubmit" ng-click="restartTasks(true)">Submit</md-button>
         </md-card-footer>
       </md-card>
@@ -179,6 +187,7 @@ Admin Settings
           <h2 class="modal-title">[[modalTitle]]</h2>
         </div>
         <div class="modal-body">
+          <div id="divMsg"></div>
           <div>The following [[tasks.length]] tasks will be restarted:</div>
           <div id="tasksDisplay">
             <li ng-repeat="task in tasks" class="link" ng-click="jumpToTask(task)">[[task]]</li>

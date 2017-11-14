@@ -21,12 +21,12 @@ a proparety of the queue object configured in the anser.Environment.
 package anser
 
 import (
+	"context"
 	"time"
 
 	"github.com/mongodb/amboy"
 	"github.com/mongodb/grip"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 // Application define the root level of a database
@@ -45,9 +45,13 @@ import (
 //
 // If the DryRun operation is set, then the application will run all
 // of the migration.
+//
+// If the Limit operation is set to a value greater than 0, the
+// application will only run *that* number of jobs.
 type Application struct {
 	Generators []Generator
 	DryRun     bool
+	Limit      int
 	env        Environment
 	hasSetup   bool
 }
@@ -101,7 +105,7 @@ func (a *Application) Run(ctx context.Context) error {
 		return errors.New("migration operation canceled")
 	}
 
-	numMigrations, err := addMigrationJobs(queue, a.DryRun)
+	numMigrations, err := addMigrationJobs(ctx, queue, a.DryRun, a.Limit)
 	if err != nil {
 		return errors.New("problem adding generated migration jobs")
 	}

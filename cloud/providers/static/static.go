@@ -1,14 +1,15 @@
 package static
 
 import (
+	"context"
 	"time"
 
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/cloud"
-	"github.com/evergreen-ci/evergreen/db/bsonutil"
 	"github.com/evergreen-ci/evergreen/hostutil"
 	"github.com/evergreen-ci/evergreen/model/distro"
 	"github.com/evergreen-ci/evergreen/model/host"
+	"github.com/mongodb/anser/bsonutil"
 	"github.com/mongodb/grip"
 	"github.com/pkg/errors"
 )
@@ -93,7 +94,7 @@ func (staticMgr *StaticManager) IsSSHReachable(host *host.Host, keyPath string) 
 	if err != nil {
 		return false, err
 	}
-	return hostutil.CheckSSHResponse(host, sshOpts)
+	return hostutil.CheckSSHResponse(context.TODO(), host, sshOpts)
 }
 
 func (staticMgr *StaticManager) IsUp(host *host.Host) (bool, error) {

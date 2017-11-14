@@ -66,15 +66,19 @@ func newAlertRecord(ctx triggerContext, alertType string) *alertrecord.AlertReco
 		Id:   bson.NewObjectId(),
 		Type: alertType,
 	}
-	if ctx.host != nil {
-		record.HostId = ctx.host.Id
-	}
 	if ctx.task != nil {
 		record.ProjectId = ctx.task.Project
 		record.VersionId = ctx.task.Version
 		record.RevisionOrderNumber = ctx.task.RevisionOrderNumber
 		record.TaskName = ctx.task.DisplayName
 		record.Variant = ctx.task.BuildVariant
+		record.TaskId = ctx.task.Id
+		record.HostId = ctx.task.HostId
 	}
+
+	if ctx.host != nil {
+		record.HostId = ctx.host.Id
+	}
+
 	return record
 }

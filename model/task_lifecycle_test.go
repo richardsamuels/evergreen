@@ -22,7 +22,7 @@ var (
 )
 
 func init() {
-	db.SetGlobalSessionProvider(db.SessionFactoryFromConfig(testutil.TestConfig()))
+	db.SetGlobalSessionProvider(testutil.TestConfig().SessionFactory())
 }
 
 func TestSetActiveState(t *testing.T) {
@@ -158,8 +158,14 @@ func TestSetActiveState(t *testing.T) {
 			Activated:   false,
 			BuildId:     buildId,
 			DependsOn: []task.Dependency{
-				{"t2", evergreen.TaskSucceeded},
-				{"t3", evergreen.TaskSucceeded},
+				{
+					TaskId: "t2",
+					Status: evergreen.TaskSucceeded,
+				},
+				{
+					TaskId: "t3",
+					Status: evergreen.TaskSucceeded,
+				},
 			},
 		}
 
@@ -286,7 +292,8 @@ func TestDeactivatePreviousTask(t *testing.T) {
 		So(currentTask.Insert(), ShouldBeNil)
 		Convey("activating a previous task should set the previous task's active field to true", func() {
 			So(DeactivatePreviousTasks(currentTask.Id, userName), ShouldBeNil)
-			previousTask, err := task.FindOne(task.ById(previousTask.Id))
+			var err error
+			previousTask, err = task.FindOne(task.ById(previousTask.Id))
 			So(err, ShouldBeNil)
 			So(previousTask.Activated, ShouldBeFalse)
 		})
@@ -339,8 +346,9 @@ func TestUpdateBuildStatusForTask(t *testing.T) {
 		So(anotherTask.Insert(), ShouldBeNil)
 		So(v.Insert(), ShouldBeNil)
 		Convey("updating the build for a task should update the build's status and the version's status", func() {
+			var err error
 			So(UpdateBuildAndVersionStatusForTask(testTask.Id), ShouldBeNil)
-			b, err := build.FindOne(build.ById(b.Id))
+			b, err = build.FindOne(build.ById(b.Id))
 			So(err, ShouldBeNil)
 			So(b.Status, ShouldEqual, evergreen.BuildFailed)
 			v, err = version.FindOne(version.ById(v.Id))
@@ -754,13 +762,14 @@ func TestMarkStart(t *testing.T) {
 			testTask, err = task.FindOne(task.ById(testTask.Id))
 			So(err, ShouldBeNil)
 			So(testTask.Status, ShouldEqual, evergreen.TaskStarted)
-			b, err := build.FindOne(build.ById(b.Id))
+			var err error
+			b, err = build.FindOne(build.ById(b.Id))
 			So(err, ShouldBeNil)
 			So(b.Status, ShouldEqual, evergreen.BuildStarted)
 			So(b.Tasks, ShouldNotBeNil)
 			So(len(b.Tasks), ShouldEqual, 1)
 			So(b.Tasks[0].Status, ShouldEqual, evergreen.TaskStarted)
-			v, err := version.FindOne(version.ById(v.Id))
+			v, err = version.FindOne(version.ById(v.Id))
 			So(err, ShouldBeNil)
 			So(v.Status, ShouldEqual, evergreen.VersionStarted)
 		})
@@ -801,11 +810,12 @@ func TestMarkUndispatched(t *testing.T) {
 		So(testTask.Insert(), ShouldBeNil)
 		So(v.Insert(), ShouldBeNil)
 		Convey("when calling MarkStart, the task, version and build should be updated", func() {
+			var err error
 			So(MarkTaskUndispatched(testTask), ShouldBeNil)
-			testTask, err := task.FindOne(task.ById(testTask.Id))
+			testTask, err = task.FindOne(task.ById(testTask.Id))
 			So(err, ShouldBeNil)
 			So(testTask.Status, ShouldEqual, evergreen.TaskUndispatched)
-			b, err := build.FindOne(build.ById(b.Id))
+			b, err = build.FindOne(build.ById(b.Id))
 			So(err, ShouldBeNil)
 			So(b.Tasks, ShouldNotBeNil)
 			So(len(b.Tasks), ShouldEqual, 1)
@@ -844,12 +854,13 @@ func TestMarkDispatched(t *testing.T) {
 		So(testTask.Insert(), ShouldBeNil)
 		Convey("when calling MarkStart, the task, version and build should be updated", func() {
 			So(MarkTaskDispatched(testTask, "testHost", "distroId"), ShouldBeNil)
-			testTask, err := task.FindOne(task.ById(testTask.Id))
+			var err error
+			testTask, err = task.FindOne(task.ById(testTask.Id))
 			So(err, ShouldBeNil)
 			So(testTask.Status, ShouldEqual, evergreen.TaskDispatched)
 			So(testTask.HostId, ShouldEqual, "testHost")
 			So(testTask.DistroId, ShouldEqual, "distroId")
-			b, err := build.FindOne(build.ById(b.Id))
+			b, err = build.FindOne(build.ById(b.Id))
 			So(err, ShouldBeNil)
 			So(b.Tasks, ShouldNotBeNil)
 			So(len(b.Tasks), ShouldEqual, 1)
@@ -971,6 +982,7 @@ func TestFailedTaskRestart(t *testing.T) {
 		Project:   "sample",
 		StartTime: time.Date(2017, time.June, 12, 12, 0, 0, 0, time.Local),
 		Status:    evergreen.TaskFailed,
+		Details:   apimodels.TaskEndDetail{Type: "system"},
 	}
 	testTask2 := &task.Task{
 		Id:        "taskThatSucceeded",
@@ -989,6 +1001,7 @@ func TestFailedTaskRestart(t *testing.T) {
 		Project:   "sample",
 		StartTime: time.Date(2017, time.June, 11, 12, 0, 0, 0, time.Local),
 		Status:    evergreen.TaskFailed,
+		Details:   apimodels.TaskEndDetail{Type: "test"},
 	}
 	p := &ProjectRef{
 		Identifier: "sample",
@@ -1012,13 +1025,27 @@ func TestFailedTaskRestart(t *testing.T) {
 	assert.NoError(testTask3.Insert())
 	assert.NoError(p.Insert())
 
-	startTime := time.Date(2017, time.June, 12, 11, 0, 0, 0, time.Local)
+	// test a dry run getting only red or purple tasks
+	startTime := time.Date(2017, time.June, 11, 11, 0, 0, 0, time.Local)
 	endTime := time.Date(2017, time.June, 12, 13, 0, 0, 0, time.Local)
-	tasksRestarted, tasksErrored, err := RestartFailedTasks(startTime, endTime, userName, false)
+	results, err := RestartFailedTasks(startTime, endTime, userName, RestartTaskOptions{DryRun: true, OnlyRed: true, OnlyPurple: false})
 	assert.NoError(err)
-	assert.Equal(0, len(tasksErrored))
-	assert.Equal(1, len(tasksRestarted))
-	assert.Equal(testTask1.Id, tasksRestarted[0])
+	assert.Nil(results.TasksErrored)
+	assert.Equal(1, len(results.TasksRestarted))
+	assert.Equal("taskOutsideOfTimeRange", results.TasksRestarted[0])
+	results, err = RestartFailedTasks(startTime, endTime, userName, RestartTaskOptions{DryRun: true, OnlyRed: false, OnlyPurple: true})
+	assert.NoError(err)
+	assert.Nil(results.TasksErrored)
+	assert.Equal(1, len(results.TasksRestarted))
+	assert.Equal("taskToRestart", results.TasksRestarted[0])
+
+	// test restarting all tasks
+	startTime = time.Date(2017, time.June, 12, 11, 0, 0, 0, time.Local)
+	results, err = RestartFailedTasks(startTime, endTime, userName, RestartTaskOptions{DryRun: false, OnlyRed: false, OnlyPurple: false})
+	assert.NoError(err)
+	assert.Equal(0, len(results.TasksErrored))
+	assert.Equal(1, len(results.TasksRestarted))
+	assert.Equal(testTask1.Id, results.TasksRestarted[0])
 	dbTask, err := task.FindOne(task.ById(testTask1.Id))
 	assert.NoError(err)
 	assert.Equal(dbTask.Status, evergreen.TaskUndispatched)

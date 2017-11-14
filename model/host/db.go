@@ -6,9 +6,10 @@ import (
 
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/db"
-	"github.com/evergreen-ci/evergreen/db/bsonutil"
 	"github.com/evergreen-ci/evergreen/model/distro"
+	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/evergreen-ci/evergreen/util"
+	"github.com/mongodb/anser/bsonutil"
 	"github.com/pkg/errors"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
@@ -38,6 +39,7 @@ var (
 	LTCKey                   = bsonutil.MustHaveTag(Host{}, "LastTaskCompleted")
 	StatusKey                = bsonutil.MustHaveTag(Host{}, "Status")
 	AgentRevisionKey         = bsonutil.MustHaveTag(Host{}, "AgentRevision")
+	NeedsNewAgentKey         = bsonutil.MustHaveTag(Host{}, "NeedsNewAgent")
 	StartedByKey             = bsonutil.MustHaveTag(Host{}, "StartedBy")
 	InstanceTypeKey          = bsonutil.MustHaveTag(Host{}, "InstanceType")
 	NotificationsKey         = bsonutil.MustHaveTag(Host{}, "Notifications")
@@ -49,6 +51,7 @@ var (
 	ZoneKey                  = bsonutil.MustHaveTag(Host{}, "Zone")
 	ProjectKey               = bsonutil.MustHaveTag(Host{}, "Project")
 	ProvisionOptionsKey      = bsonutil.MustHaveTag(Host{}, "ProvisionOptions")
+	StartTimeKey             = bsonutil.MustHaveTag(Host{}, "StartTime")
 )
 
 // === Queries ===
@@ -200,19 +203,27 @@ func ByDistroId(distroId string) db.Q {
 
 // ById produces a query that returns a host with the given id.
 func ById(id string) db.Q {
-	return db.Query(bson.D{{IdKey, id}})
+	return db.Query(bson.D{{Name: IdKey, Value: id}})
 }
 
 // ByIds produces a query that returns all hosts in the given list of ids.
 func ByIds(ids []string) db.Q {
 	return db.Query(bson.D{
-		{IdKey, bson.D{{"$in", ids}}},
+		{
+			Name: IdKey,
+			Value: bson.D{
+				{
+					Name:  "$in",
+					Value: ids,
+				},
+			},
+		},
 	})
 }
 
 // ByRunningTaskId returns a host running the task with the given id.
 func ByRunningTaskId(taskId string) db.Q {
-	return db.Query(bson.D{{RunningTaskKey, taskId}})
+	return db.Query(bson.D{{Name: RunningTaskKey, Value: taskId}})
 }
 
 // ByDynamicWithinTime is a query that returns all dynamic hosts running between a certain time and another time.
@@ -317,11 +328,11 @@ func ByExpiredSince(time time.Time) db.Q {
 
 // IsProvisioningFailure is a query that returns all hosts that
 // failed to provision.
-var IsProvisioningFailure = db.Query(bson.D{{StatusKey, evergreen.HostProvisionFailed}})
+var IsProvisioningFailure = db.Query(bson.D{{Name: StatusKey, Value: evergreen.HostProvisionFailed}})
 
-// ByRunningWithTimedOutLCT returns hosts that are running and either have no Last Commmunication Time
+// NeedsNewAgent returns hosts that are running and need a new agent, have no Last Commmunication Time,
 // or have one that exists that is greater than the MaxLTCInterval duration away from the current time.
-func ByRunningWithTimedOutLCT(currentTime time.Time) db.Q {
+func NeedsNewAgent(currentTime time.Time) db.Q {
 	cutoffTime := currentTime.Add(-MaxLCTInterval)
 	return db.Query(bson.M{
 		StatusKey:    evergreen.HostRunning,
@@ -330,6 +341,7 @@ func ByRunningWithTimedOutLCT(currentTime time.Time) db.Q {
 			{LastCommunicationTimeKey: util.ZeroTime},
 			{LastCommunicationTimeKey: bson.M{"$lte": cutoffTime}},
 			{LastCommunicationTimeKey: bson.M{"$exists": false}},
+			{NeedsNewAgentKey: true},
 		},
 	})
 }
@@ -428,9 +440,9 @@ func GetHostsByFromIdWithStatus(id, status, user string, limit, sortDir int) ([]
 	return hosts, nil
 }
 
-// hostStatsByDistroPipeline returns a pipeline that will group all up hosts by distro
+// statsByDistroPipeline returns a pipeline that will group all up hosts by distro
 // and return the count of hosts as well as how many are running tasks
-func hostStatsByDistroPipeline() []bson.M {
+func statsByDistroPipeline() []bson.M {
 	return []bson.M{
 		{
 			"$match": bson.M{
@@ -460,6 +472,30 @@ func hostStatsByDistroPipeline() []bson.M {
 				"count":             1,
 				"num_tasks_running": bson.M{"$size": "$tasks"},
 				"_id":               0,
+			},
+		},
+	}
+}
+
+// QueryWithFullTaskPipeline returns a pipeline to match hosts and embeds the
+// task document within the host, if it's running a task
+func QueryWithFullTaskPipeline(match bson.M) []bson.M {
+	return []bson.M{
+		{
+			"$match": match,
+		},
+		{
+			"$lookup": bson.M{
+				"from":         task.Collection,
+				"localField":   RunningTaskKey,
+				"foreignField": task.IdKey,
+				"as":           "task_full",
+			},
+		},
+		{
+			"$unwind": bson.M{
+				"path": "$task_full",
+				"preserveNullAndEmptyArrays": true,
 			},
 		},
 	}

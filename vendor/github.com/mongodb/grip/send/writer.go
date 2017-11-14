@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"io"
 	"sync"
+	"unicode"
 
 	"github.com/mongodb/grip/level"
 	"github.com/mongodb/grip/message"
@@ -76,12 +77,15 @@ func (s *WriterSender) doSend() error {
 			return nil
 		}
 
+		lncp := make([]byte, len(line))
+		copy(lncp, line)
+
 		if err == nil {
-			s.Send(message.NewBytesMessage(s.priority, bytes.TrimRight(line, "\r\n\t ")))
+			s.Send(message.NewBytesMessage(s.priority, bytes.TrimRightFunc(lncp, unicode.IsSpace)))
 			continue
 		}
 
-		s.Send(message.NewBytesMessage(s.priority, bytes.TrimRight(line, "\r\n\t ")))
+		s.Send(message.NewBytesMessage(s.priority, bytes.TrimRightFunc(lncp, unicode.IsSpace)))
 		return err
 	}
 }
@@ -96,7 +100,7 @@ func (s *WriterSender) Close() error {
 		return err
 	}
 
-	s.Send(message.NewBytesMessage(s.priority, bytes.TrimRight(s.buffer.Bytes(), "\r\n\t ")))
+	s.Send(message.NewBytesMessage(s.priority, bytes.TrimRightFunc(s.buffer.Bytes(), unicode.IsSpace)))
 	s.buffer.Reset()
 	s.writer.Reset(s.buffer)
 	return nil

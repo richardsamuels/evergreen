@@ -73,6 +73,7 @@ mciModule.controller('HostsCtrl', function($scope, $filter, $window, $location) 
   $scope.filter = {
     hosts : filterOpts[2] || ''
   };
+  $scope.filterText = $scope.filter.hosts;
   $scope.selectAll = false;
   $scope.filteredHosts = $scope.hosts;
 
@@ -151,6 +152,12 @@ mciModule.controller('HostsCtrl', function($scope, $filter, $window, $location) 
         $scope.filteredHosts[idx].checked = val;
     }
   };
+
+  $scope.onFilterKeyDown = function(event) {
+    if (event.key === "Enter") {
+      $scope.filter.hosts = $scope.filterText;
+    }
+  }
 
   $scope.$watch('hosts', function(hosts) {
     $scope.hostCount = 0;

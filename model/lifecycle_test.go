@@ -10,11 +10,13 @@ import (
 	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/evergreen-ci/evergreen/model/version"
 	"github.com/evergreen-ci/evergreen/testutil"
+	"github.com/mongodb/grip"
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/stretchr/testify/assert"
 )
 
 func init() {
-	db.SetGlobalSessionProvider(db.SessionFactoryFromConfig(testutil.TestConfig()))
+	db.SetGlobalSessionProvider(testutil.TestConfig().SessionFactory())
 }
 
 func taskIdInSlice(tasks []task.Task, id string) bool {
@@ -116,7 +118,8 @@ func TestBuildRestart(t *testing.T) {
 			So(taskTwo.Insert(), ShouldBeNil)
 
 			So(RestartBuild(b.Id, []string{"task1", "task2"}, true, evergreen.DefaultTaskActivator), ShouldBeNil)
-			b, err := build.FindOne(build.ById(b.Id))
+			var err error
+			b, err = build.FindOne(build.ById(b.Id))
 			So(err, ShouldBeNil)
 			So(b.Status, ShouldEqual, evergreen.BuildCreated)
 			So(b.Activated, ShouldEqual, true)
@@ -152,7 +155,8 @@ func TestBuildRestart(t *testing.T) {
 			So(taskFour.Insert(), ShouldBeNil)
 
 			So(RestartBuild(b.Id, []string{"task3", "task4"}, false, evergreen.DefaultTaskActivator), ShouldBeNil)
-			b, err := build.FindOne(build.ById(b.Id))
+			var err error
+			b, err = build.FindOne(build.ById(b.Id))
 			So(err, ShouldBeNil)
 			So(err, ShouldBeNil)
 			So(b.Status, ShouldEqual, evergreen.BuildCreated)
@@ -202,8 +206,9 @@ func TestBuildMarkAborted(t *testing.T) {
 		Convey("when marking it as aborted", func() {
 
 			Convey("it should be deactivated", func() {
+				var err error
 				So(AbortBuild(b.Id, evergreen.DefaultTaskActivator), ShouldBeNil)
-				b, err := build.FindOne(build.ById(b.Id))
+				b, err = build.FindOne(build.ById(b.Id))
 				So(err, ShouldBeNil)
 				So(b.Activated, ShouldBeFalse)
 			})
@@ -483,7 +488,8 @@ func TestBuildMarkStarted(t *testing.T) {
 			So(build.TryMarkStarted(b.Id, startTime), ShouldBeNil)
 
 			// refresh from db and check again
-			b, err := build.FindOne(build.ById(b.Id))
+			var err error
+			b, err = build.FindOne(build.ById(b.Id))
 			So(err, ShouldBeNil)
 			So(b.Status, ShouldEqual, evergreen.BuildStarted)
 			So(b.StartTime.Round(time.Second).Equal(
@@ -516,9 +522,9 @@ func TestBuildMarkFinished(t *testing.T) {
 			So(b.FinishTime.Equal(finishTime), ShouldBeTrue)
 			So(b.TimeTaken, ShouldEqual, finishTime.Sub(startTime))
 
+			var err error
 			// refresh from db and check again
-
-			b, err := build.FindOne(build.ById(b.Id))
+			b, err = build.FindOne(build.ById(b.Id))
 			So(err, ShouldBeNil)
 			So(b.Status, ShouldEqual, evergreen.BuildSucceeded)
 			So(b.FinishTime.Round(time.Second).Equal(
@@ -745,30 +751,30 @@ func TestCreateBuildFromVersion(t *testing.T) {
 			So(tasks[0].Priority, ShouldEqual, 5)
 			So(tasks[1].Priority, ShouldEqual, 5)
 			So(tasks[2].DependsOn, ShouldResemble,
-				[]task.Dependency{{tasks[0].Id, evergreen.TaskSucceeded}})
+				[]task.Dependency{{TaskId: tasks[0].Id, Status: evergreen.TaskSucceeded}})
 
 			// taskB
 			So(tasks[3].DependsOn, ShouldResemble,
-				[]task.Dependency{{tasks[0].Id, evergreen.TaskSucceeded}})
+				[]task.Dependency{{TaskId: tasks[0].Id, Status: evergreen.TaskSucceeded}})
 			So(tasks[4].DependsOn, ShouldResemble,
-				[]task.Dependency{{tasks[0].Id, evergreen.TaskSucceeded}}) //cross-variant
+				[]task.Dependency{{TaskId: tasks[0].Id, Status: evergreen.TaskSucceeded}}) //cross-variant
 			So(tasks[3].Priority, ShouldEqual, 0)
 			So(tasks[4].Priority, ShouldEqual, 0) //default priority
 
 			// taskC
 			So(tasks[5].DependsOn, ShouldResemble,
 				[]task.Dependency{
-					{tasks[0].Id, evergreen.TaskSucceeded},
-					{tasks[3].Id, evergreen.TaskSucceeded}})
+					{TaskId: tasks[0].Id, Status: evergreen.TaskSucceeded},
+					{TaskId: tasks[3].Id, Status: evergreen.TaskSucceeded}})
 			So(tasks[6].DependsOn, ShouldResemble,
 				[]task.Dependency{
-					{tasks[1].Id, evergreen.TaskSucceeded},
-					{tasks[4].Id, evergreen.TaskSucceeded}})
+					{TaskId: tasks[1].Id, Status: evergreen.TaskSucceeded},
+					{TaskId: tasks[4].Id, Status: evergreen.TaskSucceeded}})
 			So(tasks[7].DependsOn, ShouldResemble,
 				[]task.Dependency{
-					{tasks[0].Id, evergreen.TaskSucceeded},
-					{tasks[3].Id, evergreen.TaskSucceeded},
-					{tasks[5].Id, evergreen.TaskSucceeded}})
+					{TaskId: tasks[0].Id, Status: evergreen.TaskSucceeded},
+					{TaskId: tasks[3].Id, Status: evergreen.TaskSucceeded},
+					{TaskId: tasks[5].Id, Status: evergreen.TaskSucceeded}})
 			So(tasks[8].DisplayName, ShouldEqual, "taskE")
 			So(len(tasks[8].DependsOn), ShouldEqual, 8)
 		})
@@ -1025,7 +1031,8 @@ func TestDeletingBuild(t *testing.T) {
 
 			So(DeleteBuild(b.Id), ShouldBeNil)
 
-			b, err := build.FindOne(build.ById(b.Id))
+			var err error
+			b, err = build.FindOne(build.ById(b.Id))
 			So(err, ShouldBeNil)
 			So(b, ShouldBeNil)
 
@@ -1231,4 +1238,135 @@ func TestSortTasks(t *testing.T) {
 			So(sortedTasks[5].DisplayName, ShouldEqual, "A")
 		})
 	})
+}
+
+func TestVersionRestart(t *testing.T) {
+	assert := assert.New(t)
+	assert.NoError(resetTaskData())
+
+	// test that restarting a version restarts its tasks
+	taskIds := []string{"task1", "task3", "task4"}
+	assert.NoError(RestartVersion("version", taskIds, false, "test"))
+	tasks, err := task.Find(task.ByIds(taskIds))
+	assert.NoError(err)
+	assert.NotEmpty(tasks)
+	for _, t := range tasks {
+		assert.Equal(evergreen.TaskUndispatched, t.Status)
+		assert.True(t.Activated)
+	}
+
+	// test that aborting in-progress tasks works correctly
+	assert.NoError(resetTaskData())
+	taskIds = []string{"task2"}
+	assert.NoError(RestartVersion("version", taskIds, true, "test"))
+	dbTask, err := task.FindOne(task.ById("task2"))
+	assert.NoError(err)
+	assert.NotNil(dbTask)
+	assert.True(dbTask.Aborted)
+	assert.Equal(evergreen.TaskUndispatched, dbTask.Status)
+	assert.True(dbTask.Activated)
+
+	// test that not aborting in-progress tasks does not reset them
+	assert.NoError(resetTaskData())
+	taskIds = []string{"task2"}
+	assert.NoError(RestartVersion("version", taskIds, false, "test"))
+	dbTask, err = task.FindOne(task.ById("task2"))
+	assert.NoError(err)
+	assert.NotNil(dbTask)
+	assert.False(dbTask.Aborted)
+	assert.Equal(evergreen.TaskDispatched, dbTask.Status)
+}
+
+func resetTaskData() error {
+	if err := db.ClearCollections(build.Collection, task.Collection, version.Collection, task.OldCollection); err != nil {
+		return err
+	}
+	v := &version.Version{
+		Id: "version",
+	}
+	if err := v.Insert(); err != nil {
+		return err
+	}
+	build1 := &build.Build{
+		Id:      "build1",
+		Version: v.Id,
+		Tasks: []build.TaskCache{
+			{
+				Id:        "task1",
+				Status:    evergreen.TaskSucceeded,
+				Activated: true,
+			},
+			{
+				Id:        "task2",
+				Status:    evergreen.TaskDispatched,
+				Activated: true,
+			},
+		},
+	}
+	build2 := &build.Build{
+		Id:      "build2",
+		Version: v.Id,
+		Tasks: []build.TaskCache{
+			{
+				Id:        "task3",
+				Status:    evergreen.TaskSucceeded,
+				Activated: true,
+			},
+			{
+				Id:        "task4",
+				Status:    evergreen.TaskFailed,
+				Activated: true,
+			},
+		},
+	}
+	if err := build1.Insert(); err != nil {
+		return err
+	}
+	if err := build2.Insert(); err != nil {
+		return err
+	}
+	task1 := &task.Task{
+		Id:          "task1",
+		DisplayName: "task1",
+		BuildId:     build1.Id,
+		Version:     v.Id,
+		Status:      evergreen.TaskSucceeded,
+	}
+	if err := task1.Insert(); err != nil {
+		return err
+	}
+	task2 := &task.Task{
+		Id:          "task2",
+		DisplayName: "task2",
+		BuildId:     build1.Id,
+		Version:     v.Id,
+		Status:      evergreen.TaskDispatched,
+	}
+	if err := task2.Insert(); err != nil {
+		return err
+	}
+	task3 := &task.Task{
+		Id:          "task3",
+		DisplayName: "task3",
+		BuildId:     build2.Id,
+		Version:     v.Id,
+		Status:      evergreen.TaskSucceeded,
+	}
+	if err := task3.Insert(); err != nil {
+		return err
+	}
+	task4 := &task.Task{
+		Id:          "task4",
+		DisplayName: "task4",
+		BuildId:     build2.Id,
+		Version:     v.Id,
+		Status:      evergreen.TaskFailed,
+	}
+
+	if err := task4.Insert(); err != nil {
+		return err
+	}
+
+	grip.Info("reset task data")
+	return nil
 }

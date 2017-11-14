@@ -1,13 +1,16 @@
 package client
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"time"
 
+	"github.com/evergreen-ci/evergreen/model/admin"
+	"github.com/evergreen-ci/evergreen/rest"
 	"github.com/evergreen-ci/evergreen/rest/model"
 	"github.com/evergreen-ci/evergreen/util"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 func (*communicatorImpl) GetAllHosts() {}
@@ -112,7 +115,7 @@ func (c *communicatorImpl) GetHosts(ctx context.Context, f func([]*model.APIHost
 	return nil
 }
 
-func (c *communicatorImpl) SetBannerMessage(ctx context.Context, m string) error {
+func (c *communicatorImpl) SetBannerMessage(ctx context.Context, message string, theme admin.BannerTheme) error {
 	info := requestInfo{
 		method:  post,
 		version: apiVersion2,
@@ -121,8 +124,10 @@ func (c *communicatorImpl) SetBannerMessage(ctx context.Context, m string) error
 
 	_, err := c.retryRequest(ctx, info, struct {
 		Banner string `json:"banner"`
+		Theme  string `json:"theme"`
 	}{
-		Banner: m,
+		Banner: message,
+		Theme:  string(theme),
 	})
 
 	return errors.Wrap(err, "problem setting banner")
@@ -207,6 +212,113 @@ func (c *communicatorImpl) RestartRecentTasks(ctx context.Context, startAt, endA
 	_, err := c.request(ctx, info, &payload)
 	if err != nil {
 		return errors.Wrap(err, "problem restarting recent tasks")
+	}
+
+	return nil
+}
+
+func (c *communicatorImpl) GetDistrosList(ctx context.Context) ([]model.APIDistro, error) {
+	info := requestInfo{
+		method:  get,
+		version: apiVersion2,
+		path:    "distros",
+	}
+
+	resp, client_err := c.request(ctx, info, "")
+	if client_err != nil {
+		return nil, errors.Wrap(client_err, "problem fetching distribution list")
+	}
+	defer resp.Body.Close()
+
+	distros := []model.APIDistro{}
+
+	err := util.ReadJSONInto(resp.Body, &distros)
+	if err != nil {
+		return nil, errors.Wrap(err, "error parsing distribution list")
+	}
+
+	return distros, nil
+}
+
+func (c *communicatorImpl) GetCurrentUsersKeys(ctx context.Context) ([]model.APIPubKey, error) {
+	info := requestInfo{
+		method:  get,
+		version: apiVersion2,
+		path:    "keys",
+	}
+
+	resp, client_err := c.request(ctx, info, "")
+	if client_err != nil {
+		return nil, errors.Wrap(client_err, "problem fetching keys list")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		errMsg := rest.APIError{}
+
+		if err := util.ReadJSONInto(resp.Body, &errMsg); err != nil {
+			return nil, errors.Wrap(err, "problem fetching key list and parsing error message")
+		}
+		return nil, errors.Wrap(errMsg, "problem fetching key list")
+	}
+
+	keys := []model.APIPubKey{}
+
+	err := util.ReadJSONInto(resp.Body, &keys)
+	if err != nil {
+		return nil, errors.Wrap(err, "error parsing keys list")
+	}
+
+	return keys, nil
+}
+
+func (c *communicatorImpl) AddPublicKey(ctx context.Context, keyName, keyValue string) error {
+	info := requestInfo{
+		method:  post,
+		version: apiVersion2,
+		path:    "keys",
+	}
+
+	key := model.APIPubKey{
+		Name: model.APIString(keyName),
+		Key:  model.APIString(keyValue),
+	}
+
+	resp, err := c.request(ctx, info, key)
+	if err != nil {
+		return errors.Wrap(err, "problem reaching evergreen API server")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		errMsg := rest.APIError{}
+
+		if err := util.ReadJSONInto(resp.Body, &errMsg); err != nil {
+			return errors.Wrap(err, "problem adding key and parsing error message")
+		}
+		return errors.Wrap(errMsg, "problem adding key")
+	}
+
+	return nil
+}
+
+func (c *communicatorImpl) DeletePublicKey(ctx context.Context, keyName string) error {
+	info := requestInfo{
+		method:  delete,
+		version: apiVersion2,
+		path:    "keys/" + keyName,
+	}
+
+	resp, err := c.request(ctx, info, "")
+	if err != nil {
+		return errors.Wrap(err, "problem reaching evergreen API server")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		errMsg := rest.APIError{}
+
+		if err := util.ReadJSONInto(resp.Body, &errMsg); err != nil {
+			return errors.Wrap(err, "problem deleting key and parsing error message")
+		}
+		return errors.Wrap(errMsg, "problem deleting key")
 	}
 
 	return nil

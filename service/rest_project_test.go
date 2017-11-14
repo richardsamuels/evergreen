@@ -7,21 +7,18 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/urfave/negroni"
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/db"
 	"github.com/evergreen-ci/evergreen/model"
 	serviceutil "github.com/evergreen-ci/evergreen/service/testutil"
 	"github.com/evergreen-ci/evergreen/testutil"
 	"github.com/evergreen-ci/render"
+	"github.com/gorilla/mux"
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/urfave/negroni"
 )
 
 var projectTestConfig = testutil.TestConfig()
-
-func init() {
-	db.SetGlobalSessionProvider(db.SessionFactoryFromConfig(projectTestConfig))
-}
 
 func TestProjectRoutes(t *testing.T) {
 	uis := UIServer{
@@ -35,7 +32,8 @@ func TestProjectRoutes(t *testing.T) {
 		DisableCache: true,
 	})
 	testutil.HandleTestingErr(uis.InitPlugins(), t, "error installing plugins")
-	router, err := uis.NewRouter()
+	router := mux.NewRouter()
+	err := uis.AttachRoutes(router)
 	testutil.HandleTestingErr(err, t, "error setting up router")
 	n := negroni.New()
 	n.Use(negroni.HandlerFunc(UserMiddleware(uis.UserManager)))

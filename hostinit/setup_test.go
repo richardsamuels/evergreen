@@ -1,9 +1,8 @@
 package hostinit
 
 import (
+	"context"
 	"testing"
-
-	"golang.org/x/net/context"
 
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/cloud"
@@ -22,7 +21,7 @@ import (
 
 func init() {
 	reporting.QuietMode()
-	db.SetGlobalSessionProvider(db.SessionFactoryFromConfig(testutil.TestConfig()))
+	db.SetGlobalSessionProvider(testutil.TestConfig().SessionFactory())
 }
 
 func TestSetupReadyHosts(t *testing.T) {
@@ -64,7 +63,7 @@ func TestSetupReadyHosts(t *testing.T) {
 				mock.MockInstances[id] = instance
 			}
 			Convey("when running setup", func() {
-				So(hostInit.setupReadyHosts(ctx), ShouldNotBeNil)
+				So(hostInit.setupReadyHosts(ctx), ShouldBeNil)
 
 				Convey("then all of the hosts should be terminated", func() {
 					for id := range mock.MockInstances {

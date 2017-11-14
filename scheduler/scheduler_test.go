@@ -1,9 +1,8 @@
 package scheduler
 
 import (
+	"context"
 	"testing"
-
-	"golang.org/x/net/context"
 
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/cloud/providers/mock"
@@ -21,7 +20,7 @@ import (
 var schedulerTestConf = testutil.TestConfig()
 
 func init() {
-	db.SetGlobalSessionProvider(db.SessionFactoryFromConfig(schedulerTestConf))
+	db.SetGlobalSessionProvider(schedulerTestConf.SessionFactory())
 }
 
 const versionProjectString = `
@@ -44,15 +43,13 @@ tasks:
 
 // mock implementations, for testing purposes
 
-type MockTaskFinder struct{}
-
-func (self *MockTaskFinder) FindRunnableTasks() ([]task.Task, error) {
-	return nil, errors.New("FindRunnableTasks not implemented")
+func MockFindRunnableTasks() ([]task.Task, error) {
+	return nil, errors.New("MockFindRunnableTasks not implemented")
 }
 
 type MockTaskPrioritizer struct{}
 
-func (self *MockTaskPrioritizer) PrioritizeTasks(settings *evergreen.Settings,
+func (self *MockTaskPrioritizer) PrioritizeTasks(distroId string, settings *evergreen.Settings,
 	tasks []task.Task) ([]task.Task, error) {
 	return nil, errors.New("PrioritizeTasks not implemented")
 }
@@ -85,11 +82,11 @@ func TestUpdateVersionBuildVarMap(t *testing.T) {
 		versionBuildVarMap := make(map[versionBuildVariant]model.BuildVariant)
 		schedulerInstance := &Scheduler{
 			schedulerTestConf,
-			&MockTaskFinder{},
 			&MockTaskPrioritizer{},
 			&MockTaskDurationEstimator{},
 			&MockTaskQueuePersister{},
 			&MockHostAllocator{},
+			MockFindRunnableTasks,
 		}
 
 		Convey("if there are no versions with the given id, an error should "+
@@ -138,11 +135,11 @@ func TestSpawnHosts(t *testing.T) {
 
 		schedulerInstance := &Scheduler{
 			schedulerTestConf,
-			&MockTaskFinder{},
 			&MockTaskPrioritizer{},
 			&MockTaskDurationEstimator{},
 			&MockTaskQueuePersister{},
 			&MockHostAllocator{},
+			MockFindRunnableTasks,
 		}
 
 		Convey("if there are no hosts to be spawned, the Scheduler should not"+

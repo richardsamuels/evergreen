@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -11,7 +12,6 @@ import (
 	"github.com/mongodb/grip"
 	uuid "github.com/satori/go.uuid"
 	"github.com/stretchr/testify/assert"
-	"golang.org/x/net/context"
 )
 
 // the cases in this file attempt to test the behavior of the remote tasks.
@@ -38,9 +38,8 @@ func TestRemoteQueueRunsJobsOnlyOnceWithMultipleWorkers(t *testing.T) {
 		assert.NoError(q.Put(j))
 	}
 
-	amboy.WaitCtxInterval(ctx, q, 500*time.Millisecond)
+	amboy.WaitCtxInterval(ctx, q, 5*time.Second)
 
 	grip.Notice(q.Stats())
 	assert.Equal(atStart+40, mockJobCounters.Count())
-	fmt.Println(atStart+40, mockJobCounters.Count())
 }

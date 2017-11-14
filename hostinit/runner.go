@@ -1,6 +1,7 @@
 package hostinit
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -12,7 +13,6 @@ import (
 	"github.com/mongodb/grip/message"
 	"github.com/mongodb/grip/sometimes"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 // Runner executes the hostinit process.
@@ -90,10 +90,9 @@ func (r *Runner) Run(ctx context.Context, config *evergreen.Settings) error {
 	go func() {
 		defer wg.Done()
 		msg := message.Fields{
-			"GUID":    init.GUID,
-			"runner":  RunnerName,
-			"method":  "setupReadyHosts",
-			"runtime": time.Since(startTime),
+			"GUID":   init.GUID,
+			"runner": RunnerName,
+			"method": "setupReadyHosts",
 		}
 
 		var hadErrors bool

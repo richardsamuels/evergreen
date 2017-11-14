@@ -38,6 +38,16 @@ post:
 #         YAML Templates              #
 #######################################
 variables:
+  - &generic-linux-distros
+    - archlinux-test
+    - rhel62-test
+    - rhel70-small
+    - rhel62-small
+    - linux-64-amzn-test
+    - debian81-test
+    - debian71-test
+    - ubuntu1604-test
+    - ubuntu1404-test
   - &run-build
     # runs a build operations. The task name in evergreen should
     # correspond to a make target for the build operation.
@@ -87,6 +97,25 @@ variables:
       - func: set-up-mongodb
       - func: run-make
         vars: { target: "${task_name}" }
+  - &run-xc-test-suite
+    name: test
+    depends_on:
+      - name: dist-test
+    commands:
+      - func: get-dist-test
+      - func: setup-credentials
+      - func: run-cross
+        vars: { target: "${task_name}" }
+  - &run-xc-test-suite-with-mongodb
+    name: test
+    depends_on:
+      - name: dist-test
+    commands:
+      - func: get-dist-test
+      - func: setup-credentials
+      - func: set-up-mongodb
+      - func: run-cross
+        vars: { target: "${task_name}" }
 
 #######################################
 #              Functions              #
@@ -116,41 +145,89 @@ functions:
          # Run make, called with proper environment variables set,
          # running the target.
          ${build_env} make ${make_args|} ${target}
+  get-dist-test:
+    command: s3.get
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      remote_file: evergreen/${build_id}-${build_variant}/dist-test-${build_id}.tar.gz
+      bucket: mciuploads
+      local_file: dist-test.tar.gz
+  run-cross:
+    command: shell.exec
+    param:
+      script: |
+        set -o errexit
+        set -o verbose
+
+        tar -zxvf dist-test.tar.gz
+
+        export EVGHOME=`pwd`/evergreen-test
+        export SETTINGS_OVERRIDE=`pwd`/gopath/src/github.com/evergreen-ci/evergreen/creds.yml
+        export EVERGREEN_ALL=true
+
+        $EVGHOME/bin/test.$(echo ${target} | sed 's/-/./') --test.v --test.timeout=10m
   setup-credentials:
-    - command: shell.exec
-      type: system
-      params:
-        silent: true
-        script: |
-          set -o errexit
+    command: shell.exec
+    type: system
+    params:
+      silent: true
+      script: |
+        set -o errexit
 
-          echo "building creds file!"
-          cat > gopath/src/github.com/evergreen-ci/evergreen/creds.yml <<EOF
-          client_binaries_dir: "clients"
-          credentials: {
-            github: "${github_token}",
-          }
+        mkdir -p gopath/src/github.com/evergreen-ci/evergreen
 
-          jira:
-            host: ${jiraserver}
+        echo "building creds file!"
+
+        cat > gopath/src/github.com/evergreen-ci/evergreen/creds.yml <<EOF
+        database:
+          url: "mongodb://localhost:27017"
+          db: "mci"
+          write_concern:
+            wmode: majority
+
+        configdir: "config_test"
+        client_binaries_dir: "clients"
+        credentials: {
+          github: "${github_token}",
+        }
+
+        api_url: http://localhost:8080
+        ui:
+          secret: "secret for UI"
+          defaultproject: "mci"
+          url: "http://localhost:9090"
+
+        notify:
+          logfile: "evg_notify.log"
+          smtp:
+            from: "mci-notifications+test@mongodb.com"
+            server: "localhost"
+            port: 25
+            admin_email:
+              - "mci@10gen.com"
+
+
+        jira:
+          host: ${jiraserver}
+          username: ${crowduser}
+          password: ${crowdpw}
+
+        providers:
+          aws:
+            aws_id: "${aws_key}"
+            aws_secret: "${aws_secret}"
+
+        auth:
+          crowd:
             username: ${crowduser}
             password: ${crowdpw}
+            urlroot: ${crowdserver}
 
-          providers:
-            aws:
-              aws_id: "${aws_key}"
-              aws_secret: "${aws_secret}"
-
-          auth:
-            crowd:
-              username: ${crowduser}
-              password: ${crowdpw}
-              urlroot: ${crowdserver}
-
-          plugins:
-            manifest:
-              github_token: "${github_token}"
-          EOF
+        plugins:
+          manifest:
+            github_token: "${github_token}"
+        EOF
   set-up-mongodb:
     - command: shell.exec
       type: system
@@ -212,6 +289,7 @@ tasks:
         vars:
           target: "coverage-html"
           make_args: "-k"
+          build_env: "EVERGREEN_ALL=true"
   - name: lint
     tags: [ "report" ]
     commands:
@@ -222,14 +300,32 @@ tasks:
       - func: run-make
         vars: { target: "${task_name}" }
         make_args: "-k"
+  - name: dist-test
+    commands:
+      - command: git.get_project
+        type: system
+        params:
+          directory: gopath/src/github.com/evergreen-ci/evergreen
+      - func: run-make
+        vars:
+          target: "${task_name}"
+      - command: s3.put
+        type: system
+        params:
+          optional: true
+          aws_key: ${aws_key}
+          aws_secret: ${aws_secret}
+          local_file: gopath/src/github.com/evergreen-ci/evergreen/bin/${task_name}.tar.gz
+          remote_file: evergreen/${build_id}-${build_variant}/dist-test-${build_id}.tar.gz
+          bucket: mciuploads
+          content_type: application/x-gzip
+          permissions: public-read
+          display_name: dist-test-${distro_id}.tar.gz
   - <<: *run-build
     name: dist
   - <<: *run-go-test-suite
     tags: ["nodb", "test"]
     name: test-hostutil
-  - <<: *run-go-test-suite
-    tags: ["nodb", "test"]
-    name: test-remote
   - <<: *run-go-test-suite
     tags: ["nodb", "test"]
     name: test-auth
@@ -245,12 +341,12 @@ tasks:
   - <<: *run-go-test-suite
     tags: ["nodb", "test", "agent"]
     name: test-subprocess
-  - <<: *run-go-test-suite
-    tags: ["nodb", "test"]
-    name: test-db-bsonutil
   - <<: *run-go-test-suite-with-mongodb
-    tags: ["test", "agent"]
+    tags: ["test", "db", "agent"]
     name: test-command
+  - <<: *run-go-test-suite-with-mongodb
+    tags: ["test", "db"]
+    name: test-units
   - <<: *run-go-test-suite-with-mongodb
     tags: ["db", "test", "agent"]
     name: test-agent
@@ -267,19 +363,19 @@ tasks:
     tags: ["db", "test"]
     name: test-cloud-providers
   - <<: *run-go-test-suite-with-mongodb
-    tags: ["db", "test", "gccgo"]
+    tags: ["db", "test"]
     name: test-cloud-providers-docker
   - <<: *run-go-test-suite-with-mongodb
     tags: ["db", "test"]
     name: test-cloud-providers-ec2
   - <<: *run-go-test-suite-with-mongodb
-    tags: ["db", "test", "gccgo"]
+    tags: ["db", "test"]
     name: test-cloud-providers-gce
   - <<: *run-go-test-suite-with-mongodb
     tags: ["db", "test"]
     name: test-cloud-providers-openstack
   - <<: *run-go-test-suite-with-mongodb
-    tags: ["db", "test", "gccgo"]
+    tags: ["db", "test"]
     name: test-cloud-providers-vsphere
   - <<: *run-go-test-suite-with-mongodb
     tags: ["db", "test"]
@@ -339,38 +435,37 @@ tasks:
     tags: ["db", "test"]
     name: test-model-task
   - <<: *run-go-test-suite-with-mongodb
-    tags: ["db", "test", "agent"]
+    tags: ["db", "test"]
     name: test-plugin
   - <<: *run-go-test-suite-with-mongodb
     tags: ["db", "test"]
     name: test-plugin-builtin-buildbaron
   - <<: *run-go-test-suite-with-mongodb
-    tags: ["db", "test", "agent"]
-    name: test-plugin-builtin-manifest
+    tags: ["db", "test"]
+    name: test-plugin-builtin-perfdash
   - <<: *run-go-test-suite-with-mongodb
-    tags: ["db", "test", "agent"]
-    name: test-plugin-builtin-attach
+    tags: ["db", "test"]
+    name: test-plugin-builtin-manifest
   - <<: *run-go-test-suite-with-mongodb
     tags: ["db", "test"]
     name: test-migrations
+
+  # race detector tests
   - <<: *run-go-test-suite
     tags: ["nodb", "race"]
     name: race-hostutil
-  - <<: *run-go-test-suite
-    tags: ["nodb", "race"]
-    name: race-remote
   - <<: *run-go-test-suite
     tags: ["nodb", "race"]
     name: race-auth
   - <<: *run-go-test-suite
     tags: ["nodb", "race", "agent"]
     name: race-subprocess
-  - <<: *run-go-test-suite
-    tags: ["nodb", "race"]
-    name: race-db-bsonutil
   - <<: *run-go-test-suite-with-mongodb
-    tags: ["race", "agent"]
+    tags: ["race", "db", "agent"]
     name: race-command
+  - <<: *run-go-test-suite-with-mongodb
+    tags: ["race", "db"]
+    name: race-units
   - <<: *run-go-test-suite
     tags: ["nodb", "race"]
     name: race-rest-route
@@ -380,6 +475,9 @@ tasks:
   - <<: *run-go-test-suite
     tags: ["nodb", "race", "agent"]
     name: race-rest-client
+  - <<: *run-go-test-suite-with-mongodb
+    tags: ["db", "race"]
+    name: race-hostinit
   - <<: *run-go-test-suite-with-mongodb
     tags: ["db", "race", "cli"]
     name: race-cli
@@ -465,20 +563,43 @@ tasks:
     tags: ["db", "race"]
     name: race-rest-data
   - <<: *run-go-test-suite-with-mongodb
-    tags: ["db", "race", "agent"]
+    tags: ["db", "race"]
     name: race-plugin
   - <<: *run-go-test-suite-with-mongodb
-    tags: ["db", "race", "agent"]
+    tags: ["db", "race"]
     name: race-plugin-builtin-buildbaron
   - <<: *run-go-test-suite-with-mongodb
-    tags: ["db", "race", "agent"]
+    tags: ["db", "race"]
     name: race-plugin-builtin-attach
   - <<: *run-go-test-suite-with-mongodb
-    tags: ["db", "race", "agent"]
+    tags: ["db", "race"]
     name: race-plugin-builtin-manifest
   - <<: *run-go-test-suite-with-mongodb
     tags: ["db", "race"]
+    name: race-plugin-builtin-perfdash 
+  - <<: *run-go-test-suite-with-mongodb
+    tags: ["db", "race"]
     name: race-migrations
+
+  # cross compiled test suites
+  - <<: *run-xc-test-suite
+    tags: ["nodb", "xc", "agent"]
+    name: xc-rest-client
+  - <<: *run-xc-test-suite
+    tags: ["nodb", "xc", "agent"]
+    name: xc-subprocess
+  - <<: *run-xc-test-suite-with-mongodb
+    tags: ["xc", "agent"]
+    name: xc-command
+  - <<: *run-xc-test-suite-with-mongodb
+    tags: ["db", "xc", "agent"]
+    name: xc-agent
+  - <<: *run-xc-test-suite-with-mongodb
+    tags: ["db", "xc", "cli"]
+    name: xc-cli
+  - <<: *run-xc-test-suite-with-mongodb
+    tags: ["db", "xc", "agent"]
+    name: xc-util
 
 
 buildvariants:
@@ -486,25 +607,41 @@ buildvariants:
     display_name: Ubuntu 16.04
     run_on:
       - ubuntu1604-test
-      - ubuntu1604-build
     expansions:
       build_env: "GOROOT=/opt/go DISABLE_COVERAGE=yes EVERGREEN_ALL=true"
       mongodb_url: https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu1604-3.4.7.tgz
     tasks:
       - name: "dist"
       - name: ".test"
+
+  - name: ubuntu1604-debug
+    display_name: Ubuntu 16.04 Debug
+    run_on:
+      - ubuntu1604-build
+    expansions:
+      build_env: "DEBUG_ENABLED=1 GOROOT=/opt/go"
+    tasks:
+      - name: "dist"
+        depends_on:
+          - name: "dist"
+            variant: "ubuntu1604"
+
   - name: race-detector
     display_name: Race Detector
     run_on:
       - archlinux-test
-      - archlinux-build
     expansions:
-      build_env: "EVERGREEN_ALL=true RACE_ENABLED=true"
+      build_env: "EVERGREEN_ALL=true RACE_ENABLED=true RUN_COUNT=5 TEST_TIMEOUT=15m"
       mongodb_url: http://fastdl.mongodb.org/linux/mongodb-linux-x86_64-3.4.7.tgz
     tasks:
       - name: "dist"
+        distros:
+          - archlinux-build
       - name: ".race"
       - name: ".report"
+        distros:
+          - archlinux-build
+
   - name: osx
     display_name: OSX
     batchtime: 2880
@@ -516,19 +653,13 @@ buildvariants:
     tasks:
       - name: "dist"
       - name: ".test"
+
   - name: windows
     display_name: Windows
     run_on:
-      - windows-64-vs2010-compile
-      - windows-64-vs2010-test
-      - windows-64-vs2013-compile
-      - windows-64-vs2013-test
-      - windows-64-vs2015-compile
-      - windows-64-vs2015-large
       - windows-64-vs2015-small
-      - windows-64-vs2015-test
     expansions:
-      build_env: "GOROOT=c:/go DISABLE_COVERAGE=yes"
+      build_env: "GOROOT=c:/go DISABLE_COVERAGE=yes EVERGREEN_ALL=true"
       mongodb_url: https://fastdl.mongodb.org/win32/mongodb-win32-x86_64-2008plus-3.4.7.zip
       extension: ".exe"
       archiveExt: ".zip"
@@ -537,3 +668,45 @@ buildvariants:
       - name: ".nodb .test"
       - name: ".agent .test"
       - name: ".cli .test"
+
+  - name: rhel71-power8
+    display_name: RHEL 7.1 POWER8
+    batchtime: 2880
+    run_on:
+      - rhel71-power8-test
+    expansions:
+      build_env: "DISABLE_COVERAGE=yes GOOS=linux GOARCH=ppc64le"
+      mongodb_url: https://downloads.mongodb.com/linux/mongodb-linux-ppc64le-enterprise-rhel71-3.4.7.tgz
+    tasks:
+      - name: "dist-test"
+        distros:
+          *generic-linux-distros
+      - name: ".xc"
+
+  - name: rhel72-s390x
+    display_name: RHEL 7.2 zLinux
+    batchtime: 2880
+    run_on:
+      - rhel72-zseries-test
+    expansions:
+      build_env: "DISABLE_COVERAGE=yes GOOS=linux GOARCH=s390x"
+      mongodb_url: https://downloads.mongodb.com/linux/mongodb-linux-s390x-enterprise-rhel72-3.5.13.tgz
+    tasks:
+      - name: "dist-test"
+        distros:
+          *generic-linux-distros
+      - name: ".xc"
+
+  - name: ubuntu1604-arm64
+    display_name: Ubuntu 16.04 ARM
+    batchtime: 2880
+    run_on:
+      - ubuntu1604-arm64-small
+    expansions:
+      build_env: "DISABLE_COVERAGE=yes GOOS=linux GOARCH=arm64"
+      mongodb_url: https://downloads.mongodb.com/linux/mongodb-linux-arm64-enterprise-ubuntu1604-3.5.13.tgz
+    tasks:
+      - name: "dist-test"
+        distros:
+          *generic-linux-distros
+      - name: ".xc"

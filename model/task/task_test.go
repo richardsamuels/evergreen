@@ -8,8 +8,6 @@ import (
 	"github.com/evergreen-ci/evergreen/apimodels"
 	"github.com/evergreen-ci/evergreen/db"
 	"github.com/evergreen-ci/evergreen/model/build"
-	"github.com/evergreen-ci/evergreen/model/distro"
-	"github.com/evergreen-ci/evergreen/model/host"
 	"github.com/evergreen-ci/evergreen/testutil"
 	"github.com/evergreen-ci/evergreen/util"
 	. "github.com/smartystreets/goconvey/convey"
@@ -23,7 +21,7 @@ var (
 )
 
 func init() {
-	db.SetGlobalSessionProvider(db.SessionFactoryFromConfig(conf))
+	db.SetGlobalSessionProvider(conf.SessionFactory())
 }
 
 var depTaskIds = []Dependency{
@@ -78,6 +76,13 @@ func TestDependenciesMet(t *testing.T) {
 		for _, depTask := range depTasks {
 			So(depTask.Insert(), ShouldBeNil)
 		}
+
+		Convey("sanity check the local version of the function in the nil case", func() {
+			task.DependsOn = []Dependency{}
+			met, err := task.AllDependenciesSatisfied(map[string]Task{})
+			So(err, ShouldBeNil)
+			So(met, ShouldBeTrue)
+		})
 
 		Convey("if the task has no dependencies its dependencies should"+
 			" be met by default", func() {
@@ -148,6 +153,15 @@ func TestDependenciesMet(t *testing.T) {
 
 		})
 
+		Convey("new task resolver should error if cache is empty, but there are deps", func() {
+			updateTestDepTasks(t)
+			dependencyCache := make(map[string]Task)
+			task.DependsOn = depTaskIds
+			met, err := task.AllDependenciesSatisfied(dependencyCache)
+			So(err, ShouldNotBeNil)
+			So(met, ShouldBeFalse)
+		})
+
 		Convey("extraneous tasks in the dependency cache should be ignored",
 			func() {
 				So(UpdateOne(
@@ -182,10 +196,18 @@ func TestDependenciesMet(t *testing.T) {
 				So(err, ShouldBeNil)
 				So(met, ShouldBeFalse)
 
+				met, err = task.AllDependenciesSatisfied(dependencyCache)
+				So(err, ShouldBeNil)
+				So(met, ShouldBeFalse)
+
 				// remove the failed task from the dependencies (but not from
 				// the cache).  it should be ignored in the next pass
 				task.DependsOn = []Dependency{depTaskIds[0], depTaskIds[1]}
 				met, err = task.DependenciesMet(dependencyCache)
+				So(err, ShouldBeNil)
+				So(met, ShouldBeTrue)
+
+				met, err = task.AllDependenciesSatisfied(dependencyCache)
 				So(err, ShouldBeNil)
 				So(met, ShouldBeTrue)
 			})
@@ -528,7 +550,6 @@ func TestMarkAsDispatched(t *testing.T) {
 		buildId  string
 		distroId string
 		task     *Task
-		myHost   *host.Host
 		b        *build.Build
 	)
 
@@ -544,11 +565,6 @@ func TestMarkAsDispatched(t *testing.T) {
 			BuildId: buildId,
 		}
 
-		myHost = &host.Host{
-			Id:     hostId,
-			Distro: distro.Distro{Id: distroId},
-		}
-
 		b = &build.Build{
 			Id: buildId,
 			Tasks: []build.TaskCache{
@@ -557,11 +573,10 @@ func TestMarkAsDispatched(t *testing.T) {
 		}
 
 		testutil.HandleTestingErr(
-			db.ClearCollections(Collection, build.Collection, host.Collection),
+			db.ClearCollections(Collection, build.Collection),
 			t, "Error clearing test collections")
 
 		So(task.Insert(), ShouldBeNil)
-		So(myHost.Insert(), ShouldBeNil)
 		So(b.Insert(), ShouldBeNil)
 
 		Convey("when marking the task as dispatched, the fields for"+
@@ -569,19 +584,19 @@ func TestMarkAsDispatched(t *testing.T) {
 			" should be set to reflect this", func() {
 
 			// mark the task as dispatched
-			So(task.MarkAsDispatched(myHost.Id, myHost.Distro.Id, time.Now()), ShouldBeNil)
+			So(task.MarkAsDispatched(hostId, distroId, time.Now()), ShouldBeNil)
 
 			// make sure the task's fields were updated, both in ©memory and
 			// in the db
 			So(task.DispatchTime, ShouldNotResemble, time.Unix(0, 0))
 			So(task.Status, ShouldEqual, evergreen.TaskDispatched)
-			So(task.HostId, ShouldEqual, myHost.Id)
+			So(task.HostId, ShouldEqual, hostId)
 			So(task.LastHeartbeat, ShouldResemble, task.DispatchTime)
 			task, err := FindOne(ById(taskId))
 			So(err, ShouldBeNil)
 			So(task.DispatchTime, ShouldNotResemble, time.Unix(0, 0))
 			So(task.Status, ShouldEqual, evergreen.TaskDispatched)
-			So(task.HostId, ShouldEqual, myHost.Id)
+			So(task.HostId, ShouldEqual, hostId)
 			So(task.LastHeartbeat, ShouldResemble, task.DispatchTime)
 
 		})

@@ -1,6 +1,7 @@
 package command
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -10,11 +11,10 @@ import (
 	"github.com/evergreen-ci/evergreen/rest/client"
 	"github.com/evergreen-ci/evergreen/testutil"
 	. "github.com/smartystreets/goconvey/convey"
-	"golang.org/x/net/context"
 )
 
 func init() {
-	db.SetGlobalSessionProvider(db.SessionFactoryFromConfig(testutil.TestConfig()))
+	db.SetGlobalSessionProvider(testutil.TestConfig().SessionFactory())
 }
 
 func TestIncKey(t *testing.T) {

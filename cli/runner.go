@@ -1,39 +1,37 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
 
-	// import the plugins here so that they're loaded for use in
-	// the repotracker which needs them to do command validation.
-	"github.com/evergreen-ci/evergreen/model/task"
-	_ "github.com/evergreen-ci/evergreen/plugin/config"
-	"github.com/evergreen-ci/evergreen/service"
-
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/alerts"
-	"github.com/evergreen-ci/evergreen/db"
 	"github.com/evergreen-ci/evergreen/hostinit"
 	"github.com/evergreen-ci/evergreen/monitor"
 	"github.com/evergreen-ci/evergreen/notify"
 	"github.com/evergreen-ci/evergreen/repotracker"
 	"github.com/evergreen-ci/evergreen/scheduler"
+	"github.com/evergreen-ci/evergreen/service"
 	"github.com/evergreen-ci/evergreen/taskrunner"
+	"github.com/evergreen-ci/evergreen/units"
 	"github.com/evergreen-ci/evergreen/util"
+	"github.com/mongodb/amboy"
 	"github.com/mongodb/grip"
-	"github.com/mongodb/grip/level"
 	"github.com/mongodb/grip/message"
+	"github.com/mongodb/grip/recovery"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 const (
-	frequentRunInterval = 20 * time.Second
-	defaultRunInterval  = 60 * time.Second
+	frequentRunInterval   = 20 * time.Second
+	defaultRunInterval    = 60 * time.Second
+	infrequentRunInterval = 120 * time.Second
 )
 
 type ServiceRunnerCommand struct {
@@ -42,43 +40,38 @@ type ServiceRunnerCommand struct {
 }
 
 func (c *ServiceRunnerCommand) Execute(_ []string) error {
-	settings, err := evergreen.NewSettings(c.ConfigPath)
-	if err != nil {
-		return errors.Wrap(err, "problem getting settings")
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	env := evergreen.GetEnvironment()
+	grip.CatchEmergencyFatal(errors.Wrap(env.Configure(ctx, c.ConfigPath), "problem configuring application environment"))
 
-	if err = settings.Validate(); err != nil {
-		return errors.Wrap(err, "problem validating settings")
-	}
-
-	sender, err := settings.GetSender()
+	settings := env.Settings()
+	sender, err := settings.GetSender(env)
 	grip.CatchEmergencyFatal(err)
-	defer sender.Close()
 	grip.CatchEmergencyFatal(grip.SetSender(sender))
 	grip.SetName("evg-runner")
-	grip.Warning(grip.SetDefaultLevel(level.Info))
-	grip.Warning(grip.SetThreshold(level.Debug))
 
+	defer sender.Close()
+	defer recovery.LogStackTraceAndExit("evergreen runner")
+	defer cancel()
+
+	grip.SetName("evergreen.runner")
 	grip.Notice(message.Fields{"build": evergreen.BuildRevision, "process": grip.Name()})
 
 	if home := evergreen.FindEvergreenHome(); home == "" {
 		grip.EmergencyFatal("EVGHOME environment variable must be set to execute runner")
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go evergreen.SystemInfoCollector(ctx)
-	go taskStatsCollector(ctx)
-	defer util.RecoverAndLogStackTrace()
-	db.SetGlobalSessionProvider(db.SessionFactoryFromConfig(settings))
 
 	// just run a single runner if only one was passed in.
 	if c.Single != "" {
 		return runProcessByName(ctx, c.Single, settings)
 	}
 
+	startCollectorJobs(ctx, env)
+
 	pprofHandler := service.GetHandlerPprof(settings)
 	if settings.PprofPort != "" {
 		go func() {
+			defer recovery.LogStackTraceAndContinue("pprof threads")
 			grip.Alert(service.RunGracefully(settings.PprofPort, requestTimeout, pprofHandler))
 		}()
 	}
@@ -88,31 +81,24 @@ func (c *ServiceRunnerCommand) Execute(_ []string) error {
 	go listenForSIGTERM(cancel)
 	startRunners(ctx, settings)
 
-	return nil
+	return errors.WithStack(err)
 }
 
-func taskStatsCollector(ctx context.Context) {
-	const interval = time.Minute
-	timer := time.NewTimer(0)
-	defer timer.Stop()
+func startCollectorJobs(ctx context.Context, env evergreen.Environment) {
+	amboy.IntervalQueueOperation(ctx, env.LocalQueue(), time.Minute, time.Now(), true, func(queue amboy.Queue) error {
+		catcher := grip.NewBasicCatcher()
+		ts := time.Now().Unix()
 
-	for {
-		select {
-		case <-ctx.Done():
-			grip.Info("system logging operation canceled")
-			return
-		case <-timer.C:
-			tasks, err := task.GetRecentTasks(interval)
-			if err != nil {
-				grip.Warningf("problem getting recent tasks for task status update: %s", err.Error())
-				timer.Reset(interval)
-				continue
-			}
+		catcher.Add(queue.Put(units.NewAmboyStatsCollector(env, fmt.Sprintf("amboy-stats-%d", ts))))
+		catcher.Add(queue.Put(units.NewHostStatsCollector(fmt.Sprintf("host-stats-%d", ts))))
+		catcher.Add(queue.Put(units.NewTaskStatsCollector(fmt.Sprintf("task-stats-%d", ts))))
 
-			grip.Info(task.GetResultCounts(tasks))
-			timer.Reset(interval)
-		}
-	}
+		return catcher.Resolve()
+	})
+
+	amboy.IntervalQueueOperation(ctx, env.LocalQueue(), 15*time.Second, time.Now(), true, func(queue amboy.Queue) error {
+		return queue.Put(units.NewSysInfoStatsCollector(fmt.Sprintf("sys-info-stats-%d", time.Now().Unix())))
+	})
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -128,13 +114,15 @@ type processRunner interface {
 }
 
 var backgroundRunners = []processRunner{
-	&hostinit.Runner{},
-	&monitor.Runner{},
+	&alerts.QueueProcessor{},
 	&notify.Runner{},
 	&repotracker.Runner{},
-	&taskrunner.Runner{},
-	&alerts.QueueProcessor{},
+
 	&scheduler.Runner{},
+	&hostinit.Runner{},
+	&taskrunner.Runner{},
+
+	&monitor.Runner{},
 }
 
 // startRunners starts a goroutine for each runner exposed via Runners. It
@@ -142,32 +130,41 @@ var backgroundRunners = []processRunner{
 func startRunners(ctx context.Context, s *evergreen.Settings) {
 	wg := &sync.WaitGroup{}
 
-	duration := defaultRunInterval
-	if s.Runner.IntervalSeconds > 0 {
-		duration = time.Duration(s.Runner.IntervalSeconds) * time.Second
-	}
-
 	frequentRunners := []string{
 		scheduler.RunnerName,
 		hostinit.RunnerName,
 		taskrunner.RunnerName,
 	}
 
+	infrequentRunners := []string{
+		alerts.RunnerName,
+		notify.RunnerName,
+		repotracker.RunnerName,
+	}
+
 	grip.Notice(message.Fields{
-		"default_duration":  duration,
-		"default_span":      duration.String(),
-		"frequent_duration": frequentRunInterval,
-		"frequent_span":     frequentRunInterval.String(),
-		"frequent_runners":  frequentRunners,
+		"default_interval": defaultRunInterval,
+		"default_span":     defaultRunInterval.String(),
+		"frequent": message.Fields{
+			"interval": frequentRunInterval,
+			"span":     frequentRunInterval.String(),
+			"runners":  frequentRunners,
+		},
+		"infrequent": message.Fields{
+			"interval": infrequentRunInterval,
+			"span":     infrequentRunInterval.String(),
+			"runners":  infrequentRunners,
+		},
 	})
 
 	for _, r := range backgroundRunners {
 		wg.Add(1)
-
-		if util.SliceContains(frequentRunners, r.Name()) {
+		if util.StringSliceContains(frequentRunners, r.Name()) {
 			go runnerBackgroundWorker(ctx, r, s, frequentRunInterval, wg)
+		} else if util.StringSliceContains(infrequentRunners, r.Name()) {
+			go runnerBackgroundWorker(ctx, r, s, infrequentRunInterval, wg)
 		} else {
-			go runnerBackgroundWorker(ctx, r, s, duration, wg)
+			go runnerBackgroundWorker(ctx, r, s, defaultRunInterval, wg)
 		}
 	}
 
@@ -203,9 +200,16 @@ func runProcessByName(ctx context.Context, name string, settings *evergreen.Sett
 }
 
 func runnerBackgroundWorker(ctx context.Context, r processRunner, s *evergreen.Settings, dur time.Duration, wg *sync.WaitGroup) {
-	timer := time.NewTimer(0)
+	timer := time.NewTimer(time.Duration(rand.Int63n(int64(dur))))
 	defer wg.Done()
 	defer timer.Stop()
+	defer func() {
+		err := recovery.HandlePanicWithError(recover(), nil, "worker process encountered error")
+		if err != nil {
+			wg.Add(1)
+			go runnerBackgroundWorker(ctx, r, s, dur, wg)
+		}
+	}()
 
 	grip.Infoln("Starting runner process:", r.Name())
 
@@ -216,14 +220,27 @@ func runnerBackgroundWorker(ctx context.Context, r processRunner, s *evergreen.S
 			return
 		case <-timer.C:
 			if err := r.Run(ctx, s); err != nil {
+				grip.Info(message.Fields{
+					"message":  "run complete, encountered error",
+					"runner":   r.Name(),
+					"interval": dur,
+					"sleep":    dur.String(),
+					"error":    err.Error(),
+				})
+
 				subject := fmt.Sprintf("%s failure", r.Name())
-				grip.Error(err)
 				if err = notify.NotifyAdmins(subject, err.Error(), s); err != nil {
-					grip.Errorf("sending email: %+v", err)
+					grip.Error(errors.Wrap(err, "sending email"))
 				}
+			} else {
+				grip.Info(message.Fields{
+					"message":  "run completed, successfully",
+					"runner":   r.Name(),
+					"interval": dur,
+					"sleep":    dur.String(),
+				})
 			}
 
-			grip.Debugln("restarting runner loop for:", r.Name())
 			timer.Reset(dur)
 		}
 	}

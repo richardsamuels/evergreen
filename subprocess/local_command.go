@@ -1,6 +1,7 @@
 package subprocess
 
 import (
+	"context"
 	"io"
 	"os"
 	"os/exec"
@@ -10,17 +11,16 @@ import (
 	"github.com/evergreen-ci/evergreen/util"
 	"github.com/mongodb/grip"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 type LocalCommand struct {
-	CmdString        string
-	WorkingDirectory string
-	Shell            string
-	Environment      []string
-	ScriptMode       bool
-	Stdout           io.Writer
-	Stderr           io.Writer
+	CmdString        string    `json:"command"`
+	WorkingDirectory string    `json:"directory"`
+	Shell            string    `json:"shell"`
+	Environment      []string  `json:"environment"`
+	ScriptMode       bool      `json:"script"`
+	Stdout           io.Writer `json:"-"`
+	Stderr           io.Writer `json:"-"`
 	cmd              *exec.Cmd
 	mutex            sync.RWMutex
 }
@@ -36,7 +36,10 @@ func (lc *LocalCommand) Run(ctx context.Context) error {
 
 	errChan := make(chan error)
 	go func() {
-		errChan <- lc.cmd.Wait()
+		select {
+		case errChan <- lc.cmd.Wait():
+		case <-ctx.Done():
+		}
 	}()
 
 	select {
@@ -103,8 +106,8 @@ func (lc *LocalCommand) Start() error {
 }
 
 func (lc *LocalCommand) Stop() error {
-	lc.mutex.Lock()
-	defer lc.mutex.Unlock()
+	lc.mutex.RLock()
+	defer lc.mutex.RUnlock()
 
 	if lc.cmd != nil && lc.cmd.Process != nil {
 		return lc.cmd.Process.Kill()

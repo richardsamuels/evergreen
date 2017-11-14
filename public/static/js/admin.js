@@ -1,10 +1,13 @@
-mciModule.controller('AdminSettingsController', ['$scope','$window', 'mciAdminRestService', 'notificationService', function($scope, $window, mciAdminRestService, notificationService) {
+mciModule.controller('AdminSettingsController', ['$scope','$window', 'mciAdminRestService', 'notificationService', '$mdpTimePicker', function($scope, $window, mciAdminRestService, notificationService) {
   $scope.load = function() {
     $scope.Settings = {};
     $scope.Events = generateEventText(window.events);
     $scope.getSettings();
     $scope.disableRestart = false;
     $scope.disableSubmit = false;
+    $scope.restartRed = true;
+    $scope.restartPurple = true;
+    $scope.ValidThemes = [ "announcement", "information", "warning", "important"];
     $("#tasks-modal").on("hidden.bs.modal", $scope.enableSubmit);
   }
 
@@ -35,6 +38,9 @@ mciModule.controller('AdminSettingsController', ['$scope','$window', 'mciAdminRe
         case "BANNER_CHANGED":
           event.displayText = bannerChangeEventText(event);
           break;
+        case "THEME_CHANGED":
+          event.displayText = themeChangeEventText(event);
+          break;
         case "SERVICE_FLAGS_CHANGED":
           event.displayText = flagChangeEventText(event);
           break;
@@ -60,6 +66,12 @@ mciModule.controller('AdminSettingsController', ['$scope','$window', 'mciAdminRe
     return timestamp(event.timestamp) + event.data.user + " changed banner from " + oldVal + " to " + newVal;
   }
 
+  themeChangeEventText = function(event) {
+    var oldVal = event.data.old_val ? "'"+event.data.old_val+"'" : "(blank)";
+    var newVal = event.data.new_val ? "'"+event.data.new_val+"'" : "(blank)";
+    return timestamp(event.timestamp) + event.data.user + " changed banner theme from " + oldVal + " to " + newVal;
+  }
+
   flagChangeEventText = function(event) {
     var changes = [];
     for (var flag in flagDisplayNames) {
@@ -81,14 +93,21 @@ mciModule.controller('AdminSettingsController', ['$scope','$window', 'mciAdminRe
       alert("The from/to date and time must be populated to restart tasks");
       return;
     }
+    if (!$scope.restartRed && !$scope.restartPurple) {
+      alert("No tasks selected to restart");
+      return;
+    }
     if (dryRun === false) {
       $scope.disableRestart = true;
       var successHandler = function(resp) {
-        window.location.href = "/admin";
+        $("#divMsg").text("The below tasks have been queued to restart. Feel free to close this popup or inspect the tasks listed.");
+        $scope.disableSubmit = false;
       }
     }
     else {
       $scope.disableSubmit = true;
+      $scope.disableRestart = false;
+      $("#divMsg").text("");
       dryRun = true;
       var successHandler = function(resp) {
         $scope.tasks = resp.data.tasks_restarted;
@@ -106,7 +125,7 @@ mciModule.controller('AdminSettingsController', ['$scope','$window', 'mciAdminRe
       $scope.disableSubmit = false;
       return;
     }
-    mciAdminRestService.restartTasks(from, to, dryRun, { success: successHandler, error: errorHandler })
+    mciAdminRestService.restartTasks(from, to, dryRun, $scope.restartRed, $scope.restartPurple, { success: successHandler, error: errorHandler });
   }
 
   combineDateTime = function(date, time) {

@@ -3,7 +3,6 @@ package notify
 import (
 	"fmt"
 	"io/ioutil"
-	"net/mail"
 	"os"
 	"path"
 	"path/filepath"
@@ -264,7 +263,7 @@ func ValidateNotifications(mciNotification *MCINotification) error {
 
 		// ensure all supplied build variants are valid
 		for _, buildVariant := range notification.SkipVariants {
-			if !util.SliceContains(buildVariants, buildVariant) {
+			if !util.StringSliceContains(buildVariants, buildVariant) {
 				return errors.Errorf("Nonexistent buildvariant - ”%v” - specified for ”%v” notification", buildVariant, notification.Name)
 			}
 		}
@@ -280,7 +279,7 @@ func ValidateNotifications(mciNotification *MCINotification) error {
 
 		for _, subscription := range team.Subscriptions {
 			for _, notification := range subscription.NotifyOn {
-				if !util.SliceContains(allNotifications, notification) {
+				if !util.StringSliceContains(allNotifications, notification) {
 					return errors.Errorf("Team ”%v” contains a non-existent subscription - %v", team.Name, notification)
 				}
 			}
@@ -290,7 +289,7 @@ func ValidateNotifications(mciNotification *MCINotification) error {
 					return errors.Errorf("Teams validation failed: project `%v` not found", subscription.Project)
 				}
 
-				if !util.SliceContains(buildVariants, buildVariant) {
+				if !util.StringSliceContains(buildVariants, buildVariant) {
 					return errors.Errorf("Nonexistent buildvariant - ”%v” - specified for team ”%v” ", buildVariant, team.Name)
 				}
 			}
@@ -300,7 +299,7 @@ func ValidateNotifications(mciNotification *MCINotification) error {
 	// Validate patch notifications
 	for _, subscription := range mciNotification.PatchNotifications {
 		for _, notification := range subscription.NotifyOn {
-			if !util.SliceContains(allNotifications, notification) {
+			if !util.StringSliceContains(allNotifications, notification) {
 				return errors.Errorf("Nonexistent patch notification - ”%v” - specified", notification)
 			}
 		}
@@ -315,7 +314,7 @@ func ValidateNotifications(mciNotification *MCINotification) error {
 		}
 
 		for _, buildVariant := range subscription.SkipVariants {
-			if !util.SliceContains(buildVariants, buildVariant) {
+			if !util.StringSliceContains(buildVariants, buildVariant) {
 				return errors.Errorf("Nonexistent buildvariant - ”%v” - specified for patch notifications", buildVariant)
 			}
 		}
@@ -356,6 +355,7 @@ func ProcessNotifications(ae *web.App, mciNotification *MCINotification, updateT
 // This function is responsible for managing the sending triggered email notifications
 func SendNotifications(settings *evergreen.Settings, mciNotification *MCINotification,
 	emails map[NotificationKey][]Email, mailer Mailer) (err error) {
+
 	grip.Info("Sending notifications...")
 
 	// parse all notifications, sending it to relevant recipients
@@ -571,15 +571,6 @@ func constructChangeInfo(v *version.Version, notification *NotificationKey) (cha
 	return
 }
 
-// use mail's rfc2047 to encode any string
-func encodeRFC2047(String string) string {
-	addr := mail.Address{
-		Name:    String,
-		Address: "",
-	}
-	return strings.Trim(addr.String(), " <>")
-}
-
 // get the display name for a build variant's
 // task given the build variant name
 func getDisplayName(buildVariant string) (displayName string) {
@@ -595,7 +586,7 @@ func getDisplayName(buildVariant string) (displayName string) {
 
 // get the failed task(s) for a given build
 func getFailedTasks(current *build.Build, notificationName string) (failedTasks []build.TaskCache) {
-	if util.SliceContains(buildFailureKeys, notificationName) {
+	if util.StringSliceContains(buildFailureKeys, notificationName) {
 		for _, t := range current.Tasks {
 			if t.Status == evergreen.TaskFailed {
 				failedTasks = append(failedTasks, t)
@@ -607,7 +598,7 @@ func getFailedTasks(current *build.Build, notificationName string) (failedTasks 
 
 // get the specific failed test(s) for this task
 func getFailedTests(current *task.Task, notificationName string) (failedTests []task.TestResult) {
-	if util.SliceContains(taskFailureKeys, notificationName) {
+	if util.StringSliceContains(taskFailureKeys, notificationName) {
 		for _, test := range current.TestResults {
 			if test.Status == "fail" {
 				// get the base name for windows/non-windows paths
@@ -688,6 +679,16 @@ func getType(notification string) (nkType string) {
 	return
 }
 
+func notificationKeySliceContains(slice []NotificationKey, item NotificationKey) bool {
+	for idx := range slice {
+		if slice[idx] == item {
+			return true
+		}
+	}
+
+	return false
+}
+
 // creates/returns slice of 'relevant' NotificationKeys a
 // notification is relevant if it has at least one recipient
 func notificationsToStruct(mciNotification *MCINotification) (notifyOn []NotificationKey) {
@@ -703,7 +704,7 @@ func notificationsToStruct(mciNotification *MCINotification) (notifyOn []Notific
 			}
 
 			// prevent duplicate notifications from being sent
-			if !util.SliceContains(notifyOn, key) {
+			if !notificationKeySliceContains(notifyOn, key) {
 				notifyOn = append(notifyOn, key)
 			}
 		}
@@ -721,7 +722,7 @@ func notificationsToStruct(mciNotification *MCINotification) (notifyOn []Notific
 				}
 
 				// prevent duplicate notifications from being sent
-				if !util.SliceContains(notifyOn, key) {
+				if !notificationKeySliceContains(notifyOn, key) {
 					notifyOn = append(notifyOn, key)
 				}
 			}
@@ -739,7 +740,7 @@ func notificationsToStruct(mciNotification *MCINotification) (notifyOn []Notific
 			}
 
 			// prevent duplicate notifications from being sent
-			if !util.SliceContains(notifyOn, key) {
+			if !notificationKeySliceContains(notifyOn, key) {
 				notifyOn = append(notifyOn, key)
 			}
 		}
@@ -767,13 +768,13 @@ func (nk NotificationKey) String() string {
 func TrySendNotification(recipients []string, subject, body string, mailer Mailer) (err error) {
 	// grip.Debugf("address: %s subject: %s body: %s", recipients, subject, body)
 	// return nil
-	_, err = util.Retry(func() error {
+	_, err = util.Retry(func() (bool, error) {
 		err = mailer.SendMail(recipients, subject, body)
 		if err != nil {
 			grip.Errorln("Error sending notification:", err)
-			return util.RetriableError{err}
+			return true, err
 		}
-		return nil
+		return false, nil
 	}, NumSmtpRetries, SmtpSleepTime)
 	return errors.WithStack(err)
 }

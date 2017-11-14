@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/evergreen-ci/evergreen/db"
+	"github.com/mongodb/anser/bsonutil"
 	"github.com/pkg/errors"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
@@ -52,6 +53,10 @@ func (u *DBUser) GetAPIKey() string {
 	return u.APIKey
 }
 
+func (u *DBUser) IsNil() bool {
+	return u == nil
+}
+
 func (u *DBUser) GetPublicKey(keyname string) (string, error) {
 	for _, publicKey := range u.PubKeys {
 		if publicKey.Name == keyname {
@@ -59,6 +64,57 @@ func (u *DBUser) GetPublicKey(keyname string) (string, error) {
 		}
 	}
 	return "", errors.Errorf("Unable to find public key '%v' for user '%v'", keyname, u.Username())
+}
+
+func (u *DBUser) AddPublicKey(keyName, keyValue string) error {
+	key := PubKey{
+		Name:      keyName,
+		Key:       keyValue,
+		CreatedAt: time.Now(),
+	}
+	userWithoutKey := bson.M{
+		IdKey: u.Id,
+		bsonutil.GetDottedKeyName(PubKeysKey, PubKeyNameKey): bson.M{"$ne": keyName},
+	}
+	update := bson.M{
+		"$push": bson.M{PubKeysKey: key},
+	}
+
+	if err := UpdateOne(userWithoutKey, update); err != nil {
+		return err
+	}
+
+	u.PubKeys = append(u.PubKeys, key)
+	return nil
+}
+
+func (u *DBUser) DeletePublicKey(keyName string) error {
+	newUser := DBUser{}
+
+	selector := bson.M{
+		IdKey: u.Id,
+		bsonutil.GetDottedKeyName(PubKeysKey, PubKeyNameKey): bson.M{"$eq": keyName},
+	}
+	c := mgo.Change{
+		Update: bson.M{
+			"$pull": bson.M{
+				PubKeysKey: bson.M{
+					PubKeyNameKey: keyName,
+				},
+			},
+		},
+		ReturnNew: true,
+	}
+	change, err := db.FindAndModify(Collection, selector, nil, c, &newUser)
+
+	if err != nil {
+		return errors.Wrap(err, "couldn't delete public key from user")
+	}
+	if change.Updated != 1 {
+		return errors.Errorf("public key deletion query succeeded but unexpected ChangeInfo: %+v", change)
+	}
+	u.PubKeys = newUser.PubKeys
+	return nil
 }
 
 func (u *DBUser) PublicKeys() []PubKey {

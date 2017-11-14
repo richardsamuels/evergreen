@@ -2,6 +2,7 @@ package taskrunner
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
@@ -11,20 +12,21 @@ import (
 
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/cloud/providers"
+	"github.com/evergreen-ci/evergreen/hostutil"
 	"github.com/evergreen-ci/evergreen/model/distro"
+	"github.com/evergreen-ci/evergreen/model/event"
 	"github.com/evergreen-ci/evergreen/model/host"
 	"github.com/evergreen-ci/evergreen/subprocess"
 	"github.com/evergreen-ci/evergreen/util"
 	"github.com/mongodb/grip"
+	"github.com/mongodb/grip/message"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 const (
-	MakeShellTimeout  = 2 * time.Minute
-	SCPTimeout        = 3 * time.Minute
-	StartAgentTimeout = 2 * time.Minute
-	agentFile         = "agent"
+	// SSHTimeout defines the timeout for the SSH commands in this package.
+	SSHTimeout = 1 * time.Minute
+	agentFile  = "agent"
 )
 
 // HostGateway is responsible for kicking off tasks on remote machines.
@@ -43,10 +45,38 @@ type AgentHostGateway struct {
 	ExecutablesDir string
 }
 
-// Start the task specified, on the host specified.  First runs any necessary
+func getHostMessage(h host.Host) message.Fields {
+	m := message.Fields{
+		"message":  "starting agent on host",
+		"runner":   "taskrunner",
+		"host":     h.Host,
+		"distro":   h.Distro.Id,
+		"provider": h.Distro.Provider,
+	}
+
+	if h.InstanceType != "" {
+		m["instance"] = h.InstanceType
+	}
+
+	sinceLCT := time.Since(h.LastCommunicationTime)
+	if h.NeedsNewAgent {
+		m["reason"] = "flagged for new agent"
+	} else if h.LastCommunicationTime.IsZero() {
+		m["reason"] = "new host"
+	} else if sinceLCT > host.MaxLCTInterval {
+		m["reason"] = "host has exceeded last communication threshold"
+		m["threshold"] = host.MaxLCTInterval
+		m["threshold_span"] = host.MaxLCTInterval.String()
+		m["last_communication_at"] = sinceLCT
+		m["last_communication_at_time"] = sinceLCT.String()
+	}
+
+	return m
+}
+
+// Start an agent on the host specified.  First runs any necessary
 // preparation on the remote machine, then kicks off the agent process on the
-// machine.
-// Returns an error if any step along the way fails.
+// machine. Returns an error if any step along the way fails.
 func (agbh *AgentHostGateway) StartAgentOnHost(settings *evergreen.Settings, hostObj host.Host) error {
 
 	// get the host's SSH options
@@ -66,15 +96,12 @@ func (agbh *AgentHostGateway) StartAgentOnHost(settings *evergreen.Settings, hos
 	hostObj.Distro = *d
 
 	// prep the remote host
-	grip.Infof("Prepping remote host %v...", hostObj.Id)
-	agentRevision, err := agbh.prepRemoteHost(hostObj, sshOptions)
+	grip.Info(message.Fields{"message": "prepping host for agent", "host": hostObj.Id})
+	agentRevision, err := agbh.prepRemoteHost(hostObj, sshOptions, settings)
 	if err != nil {
 		return errors.Wrapf(err, "error prepping remote host %s", hostObj.Id)
 	}
-	grip.Infof("Prepping host %v finished successfully", hostObj.Id)
-
-	// start the agent on the remote machine
-	grip.Infof("Starting agent on host %v", hostObj.Id)
+	grip.Info(message.Fields{"message": "prepping host finished successfully", "host": hostObj.Id})
 
 	// generate the host secret if none exists
 	if hostObj.Secret == "" {
@@ -83,15 +110,25 @@ func (agbh *AgentHostGateway) StartAgentOnHost(settings *evergreen.Settings, hos
 		}
 	}
 
-	err = startAgentOnRemote(settings, &hostObj, sshOptions)
-	if err != nil {
+	// Start agent to listen for tasks
+	grip.Info(getHostMessage(hostObj))
+	if err = startAgentOnRemote(settings, &hostObj, sshOptions); err != nil {
+		// mark the host's provisioning as failed
+		if err = hostObj.SetUnprovisioned(); err != nil {
+			grip.Errorf("unprovisioning host %s failed: %+v", hostObj.Id, err)
+		}
 		return errors.WithStack(err)
 	}
-	grip.Infof("Agent successfully started for host %v", hostObj.Id)
+	grip.Info(message.Fields{"message": "agent successfully started for host", "host": hostObj.Id})
 
-	err = hostObj.SetAgentRevision(agentRevision)
-	if err != nil {
-		return errors.WithStack(err)
+	if err = hostObj.SetAgentRevision(agentRevision); err != nil {
+		return errors.Wrapf(err, "error setting agent revision on host %s", hostObj.Id)
+	}
+	if err = hostObj.UpdateLastCommunicated(); err != nil {
+		return errors.Wrapf(err, "error setting LCT on host %s", hostObj.Id)
+	}
+	if err = hostObj.SetNeedsNewAgent(false); err != nil {
+		return errors.Wrapf(err, "error setting needs agent flag on host %s", hostObj.Id)
 	}
 	return nil
 }
@@ -107,107 +144,22 @@ func (agbh *AgentHostGateway) GetAgentRevision() (string, error) {
 	return strings.TrimSpace(string(hashBytes)), nil
 }
 
-// executableSubPath returns the directory containing the compiled agents.
-func executableSubPath(d *distro.Distro) string {
-	mainName := "evergreen"
-	if isWindows(d) {
-		mainName += ".exe"
-	}
-
-	return filepath.Join(d.Arch, mainName)
-}
-
-func isWindows(d *distro.Distro) bool {
-	return strings.HasPrefix(d.Arch, "windows")
-}
-
-func newCappedOutputLog() *util.CappedWriter {
-	// store up to 1MB of streamed command output to print if a command fails
-	return &util.CappedWriter{
-		Buffer:   &bytes.Buffer{},
-		MaxBytes: 1024 * 1024, // 1MB
-	}
-}
-
 // Prepare the remote machine to run a task.
-// This consists of:
-// 1. Creating the directories on the remote host where, according to the distro's settings,
-//    the agent should be placed.
-// 2. Copying the agent into that directory.
-func (agbh *AgentHostGateway) prepRemoteHost(hostObj host.Host, sshOptions []string) (string, error) {
-	// compute any info necessary to ssh into the host
-	hostInfo, err := util.ParseSSHInfo(hostObj.Host)
-	if err != nil {
-		return "", errors.Wrapf(err, "error parsing ssh info %v", hostObj.Host)
+// 1. Create the directories on the remote host.
+// 2. Copy the binary to the remote host.
+// 3. Run the setup script with the binary.
+func (agbh *AgentHostGateway) prepRemoteHost(hostObj host.Host, sshOptions []string, settings *evergreen.Settings) (string, error) {
+	// copy over the correct agent binary to the remote host
+	if err := hostutil.RunSSHCommand("curl", hostutil.CurlCommand(settings.Ui.Url, &hostObj), sshOptions, hostObj); err != nil {
+		return "", errors.Wrap(err, "error downloading agent binary on remote host")
 	}
 
-	// first, create the necessary sandbox of directories on the remote machine
-	mkdirOutput := newCappedOutputLog()
-	makeShellCmd := &subprocess.RemoteCommand{
-		Id:             fmt.Sprintf("agent_mkdir-%v", rand.Int()),
-		CmdString:      fmt.Sprintf("mkdir -m 777 -p %v", hostObj.Distro.WorkDir),
-		Stdout:         mkdirOutput,
-		Stderr:         mkdirOutput,
-		RemoteHostName: hostInfo.Hostname,
-		User:           hostObj.User,
-		Options:        append([]string{"-p", hostInfo.Port}, sshOptions...),
-		Background:     false,
-	}
-	grip.Infof("Directories command: '%#v'", makeShellCmd)
-
-	// run the make shell command with a timeout
-	ctx, cancel := context.WithTimeout(context.TODO(), MakeShellTimeout)
-	defer cancel()
-	err = makeShellCmd.Run(ctx)
-
-	grip.Notice(makeShellCmd.Stop())
-	if err != nil {
-		if err == util.ErrTimedOut {
-			return "", errors.Errorf("creating remote directories timed out: %s",
-				mkdirOutput.String())
-		}
-		return "", errors.Wrapf(err, "error creating directories on remote machine: %s",
-			mkdirOutput.String())
+	// run the setup script with the agent
+	if err := hostutil.RunSSHCommand("setup", hostutil.SetupCommand(&hostObj), sshOptions, hostObj); err != nil {
+		return "", errors.Wrap(err, "error running setup script on remote host")
 	}
 
-	// third, copy over the correct agent binary to the remote machine
-	scpAgentOutput := newCappedOutputLog()
-	scpAgentCmd := &subprocess.ScpCommand{
-		Id:             fmt.Sprintf("scp%v", rand.Int()),
-		Source:         filepath.Join(agbh.ExecutablesDir, executableSubPath(&hostObj.Distro)),
-		Dest:           hostObj.Distro.WorkDir,
-		Stdout:         scpAgentOutput,
-		Stderr:         scpAgentOutput,
-		RemoteHostName: hostInfo.Hostname,
-		User:           hostObj.User,
-		Options:        append([]string{"-P", hostInfo.Port}, sshOptions...),
-	}
-
-	// get the agent's revision before scp'ing over the executable
-	preSCPAgentRevision, err := agbh.GetAgentRevision()
-	grip.Error(errors.Wrap(err, "Error getting pre scp agent revision"))
-
-	// run the command to scp the agent with a timeout
-	ctx, cancel = context.WithTimeout(context.TODO(), SCPTimeout)
-	defer cancel()
-	err = scpAgentCmd.Run(ctx)
-	grip.Notice(scpAgentCmd.Stop())
-	if err != nil {
-		if err == util.ErrTimedOut {
-			return "", errors.Errorf("scp-ing agent binary timed out: %v", scpAgentOutput.String())
-		}
-		return "", errors.Errorf(
-			"error copying agent binary to remote machine (%v): %v", err, scpAgentOutput.String())
-	}
-
-	// get the agent's revision after scp'ing over the executable
-	postSCPAgentRevision, err := agbh.GetAgentRevision()
-	grip.Error(errors.Wrap(err, "Error getting post scp agent revision"))
-	grip.WarningWhenf(preSCPAgentRevision != postSCPAgentRevision,
-		"Agent revision was %v before scp but is now %v. Using previous revision %v for host %v",
-		preSCPAgentRevision, postSCPAgentRevision, preSCPAgentRevision, hostObj.Id)
-
-	return preSCPAgentRevision, nil
+	return agbh.GetAgentRevision()
 }
 
 const logAggregationEnabled = false
@@ -215,8 +167,8 @@ const logAggregationEnabled = false
 // Start the agent process on the specified remote host.
 func startAgentOnRemote(settings *evergreen.Settings, hostObj *host.Host, sshOptions []string) error {
 	// the path to the agent binary on the remote machine
-	pathToExecutable := filepath.Join(hostObj.Distro.WorkDir, "evergreen")
-	if isWindows(&hostObj.Distro) {
+	pathToExecutable := filepath.Join("~", "evergreen")
+	if hostutil.IsWindows(&hostObj.Distro) {
 		pathToExecutable += ".exe"
 	}
 
@@ -229,10 +181,15 @@ func startAgentOnRemote(settings *evergreen.Settings, hostObj *host.Host, sshOpt
 		fmt.Sprintf("--log_prefix='%s'", filepath.Join(hostObj.Distro.WorkDir, agentFile)),
 		fmt.Sprintf("--working_directory='%s'", hostObj.Distro.WorkDir),
 	}
-
 	// build the command to run on the remote machine
 	remoteCmd := strings.Join(agentCmdParts, " ")
-	grip.Info(remoteCmd)
+	cmdId := fmt.Sprintf("startagent-%s-%d", hostObj.Id, rand.Int())
+	grip.Info(message.Fields{
+		"id":      cmdId,
+		"message": "starting agent on host",
+		"host":    hostObj.Id,
+		"command": remoteCmd,
+	})
 
 	// compute any info necessary to ssh into the host
 	hostInfo, err := util.ParseSSHInfo(hostObj.Host)
@@ -243,7 +200,7 @@ func startAgentOnRemote(settings *evergreen.Settings, hostObj *host.Host, sshOpt
 	// run the command to kick off the agent remotely
 	var startAgentLog bytes.Buffer
 	startAgentCmd := &subprocess.RemoteCommand{
-		Id:             fmt.Sprintf("startagent-%s-%d", hostObj.Id, rand.Int()),
+		Id:             cmdId,
 		CmdString:      remoteCmd,
 		Stdout:         &startAgentLog,
 		Stderr:         &startAgentLog,
@@ -268,7 +225,7 @@ func startAgentOnRemote(settings *evergreen.Settings, hostObj *host.Host, sshOpt
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.TODO(), StartAgentTimeout)
+	ctx, cancel := context.WithTimeout(context.TODO(), SSHTimeout)
 	defer cancel()
 	err = startAgentCmd.Run(ctx)
 
@@ -281,5 +238,8 @@ func startAgentOnRemote(settings *evergreen.Settings, hostObj *host.Host, sshOpt
 		}
 		return errors.Wrapf(err, "error starting agent (%v): %v", hostObj.Id, startAgentLog.String())
 	}
+
+	event.LogHostAgentDeployed(hostObj.Id)
+
 	return nil
 }

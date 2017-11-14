@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -21,7 +22,6 @@ import (
 	"github.com/mongodb/grip"
 	"github.com/mongodb/grip/message"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 // StartTask marks the task as started.
@@ -452,12 +452,12 @@ func (c *communicatorImpl) GetManifest(ctx context.Context, taskData TaskData) (
 	}
 	defer resp.Body.Close()
 
-	manifest := manifest.Manifest{}
-	if err = util.ReadJSONInto(resp.Body, &manifest); err != nil {
+	mfest := manifest.Manifest{}
+	if err = util.ReadJSONInto(resp.Body, &mfest); err != nil {
 		return nil, errors.Wrapf(err, "problem parsing manifest response for %s", taskData.ID)
 	}
 
-	return &manifest, nil
+	return &mfest, nil
 }
 
 func (c *communicatorImpl) S3Copy(ctx context.Context, taskData TaskData, req *apimodels.S3CopyRequest) error {

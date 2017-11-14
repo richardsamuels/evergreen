@@ -1,10 +1,10 @@
 # start project configuration
 name := evergreen
 buildDir := bin
-packages := $(name) agent db cli remote subprocess taskrunner util plugin hostinit
-packages += command plugin-builtin-attach plugin-builtin-manifest plugin-builtin-buildbaron
+packages := $(name) agent db cli subprocess taskrunner util plugin hostinit units command 
+packages += plugin-builtin-attach plugin-builtin-manifest plugin-builtin-buildbaron plugin-builtin-perfdash
 packages += notify thirdparty alerts auth scheduler model hostutil validator service monitor repotracker
-packages += model-patch model-artifact model-host model-build model-event model-task db-bsonutil
+packages += model-patch model-artifact model-host model-build model-event model-task
 packages += cloud-providers cloud-providers-docker cloud-providers-ec2 cloud-providers-gce cloud-providers-openstack cloud-providers-vsphere
 packages += rest-client rest-data rest-route rest-model migrations
 orgPath := github.com/evergreen-ci
@@ -13,7 +13,7 @@ projectPath := $(orgPath)/$(name)
 
 
 # start evergreen specific configuration
-unixPlatforms := linux_amd64 darwin_amd64 $(if $(STAGING_ONLY),,linux_386 linux_s390x linux_arm64 linux_ppc64le solaris_amd64)
+unixPlatforms := linux_amd64 darwin_amd64 $(if $(STAGING_ONLY),,linux_386 linux_s390x linux_arm64 linux_ppc64le)
 windowsPlatforms := windows_amd64 $(if $(STAGING_ONLY),,windows_386)
 
 goos := $(shell go env GOOS)
@@ -34,7 +34,7 @@ distTestRaceContents := $(foreach pkg,$(packages),$(buildDir)/race.$(pkg))
 srcFiles := makefile $(shell find . -name "*.go" -not -path "./$(buildDir)/*" -not -name "*_test.go" -not -path "./scripts/*" -not -path "*\#*")
 testSrcFiles := makefile $(shell find . -name "*.go" -not -path "./$(buildDir)/*" -not -path "*\#*")
 currentHash := $(shell git rev-parse HEAD)
-ldFlags := "-w -s -X=github.com/evergreen-ci/evergreen.BuildRevision=$(currentHash)"
+ldFlags := "$(if $(DEBUG_ENABLED),,-w -s )-X=github.com/evergreen-ci/evergreen.BuildRevision=$(currentHash)"
 # end evergreen specific configuration
 
 
@@ -44,11 +44,11 @@ ldFlags := "-w -s -X=github.com/evergreen-ci/evergreen.BuildRevision=$(currentHa
 #   vendorize all of these dependencies.
 lintDeps := github.com/alecthomas/gometalinter
 #   include test files and give linters 40s to run to avoid timeouts
-lintArgs := --tests --deadline=3m --vendor --aggregate --sort=line
+lintArgs := --tests --deadline=5m --vendor --aggregate --sort=line
 lintArgs += --vendored-linters --enable-gc
 #   gotype produces false positives because it reads .a files which
 #   are rarely up to date.
-lintArgs += --disable="gotype" --disable="gas" --disable="gocyclo"
+lintArgs += --disable="gotype" --disable="gas" --disable="gocyclo" --disable="maligned"
 lintArgs += --disable="golint" --disable="goconst" --disable="dupl"
 lintArgs += --disable="varcheck" --disable="structcheck" --disable="aligncheck"
 lintArgs += --skip="$(buildDir)" --skip="scripts" --skip="$(gopath)"
@@ -65,14 +65,6 @@ lintArgs += --exclude="error return value not checked \(defer .* \(errcheck\)$$"
 ## Build rules and instructions for building evergreen binaries and targets.
 ##
 ######################################################################
-
-
-# start rules for services and clients
-plugins:$(buildDir)/.plugins
-$(buildDir)/.plugins:Plugins install_plugins.sh
-	./install_plugins.sh
-	@touch $@
-# end rules for building server binaries
 
 
 # start rules for building services and clients
@@ -138,16 +130,18 @@ $(buildDir)/run-linter:scripts/run-linter.go $(buildDir)/.lintSetup
 # distribution targets and implementation
 $(buildDir)/build-cross-compile:scripts/build-cross-compile.go makefile
 	@mkdir -p $(buildDir)
-	@GOOS="" GOOARCH="" go build -o $@ $<
+	@GOOS="" GOARCH="" go build -o $@ $<
 	@echo go build -o $@ $<
 $(buildDir)/make-tarball:scripts/make-tarball.go
-	go build -o $@ $<
+	@mkdir -p $(buildDir)
+	@GOOS="" GOARCH="" go build -o $@ $<
+	@echo go build -o $@ $<
 dist:$(buildDir)/dist.tar.gz
 dist-test:$(buildDir)/dist-test.tar.gz
 dist-source:$(buildDir)/dist-source.tar.gz
-$(buildDir)/dist.tar.gz:$(buildDir)/make-tarball plugins clis $(clientBuildDir)/version
+$(buildDir)/dist.tar.gz:$(buildDir)/make-tarball clis $(clientBuildDir)/version
 	./$< --name $@ --prefix $(name) $(foreach item,$(distContents),--item $(item))
-$(buildDir)/dist-test.tar.gz:$(buildDir)/make-tarball plugins makefile $(distTestContents) # $(distTestRaceContents)
+$(buildDir)/dist-test.tar.gz:$(buildDir)/make-tarball makefile $(distTestContents) # $(distTestRaceContents)
 	./$< -name $@ --prefix $(name)-tests $(foreach item,$(distContents) $(distTestContents),--item $(item)) $(foreach item,,--item $(item))
 $(buildDir)/dist-source.tar.gz:$(buildDir)/make-tarball $(srcFiles) $(testSrcFiles) makefile
 	./$< --name $@ --prefix $(name) $(subst $(name),,$(foreach pkg,$(packages),--item ./$(subst -,/,$(pkg)))) --item ./scripts --item makefile --exclude "$(name)" --exclude "^.git/" --exclude "$(buildDir)/"
@@ -191,24 +185,21 @@ lint-%:$(buildDir)/output.%.lint
 
 # start vendoring configuration
 vendor-clean:
-	rm -rf vendor/github.com/stretchr/testify/vendor/
-	rm -rf vendor/github.com/mongodb/grip/vendor/github.com/stretchr/
-	rm -rf vendor/github.com/mongodb/grip/vendor/github.com/davecgh/
-	rm -rf vendor/github.com/mongodb/grip/vendor/github.com/pmezard/
-	rm -rf vendor/github.com/mongodb/grip/vendor/golang.org/x/net/
+	rm -rf vendor/github.com/mongodb/grip/vendor/github.com/stretchr/testify/
 	rm -rf vendor/github.com/mongodb/grip/vendor/golang.org/x/oauth2/
-	rm -rf vendor/github.com/mongodb/amboy/vendor/golang.org/x/net/
 	rm -rf vendor/github.com/mongodb/amboy/vendor/gopkg.in/mgo.v2/
-	rm -rf vendor/github.com/mongodb/amboy/vendor/github.com/stretchr/
-	rm -rf vendor/github.com/mongodb/amboy/vendor/github.com/mongodb/grip/
 	rm -rf vendor/github.com/mongodb/amboy/vendor/gopkg.in/yaml.v2/
+	rm -rf vendor/github.com/mongodb/amboy/vendor/github.com/stretchr/testify/
+	rm -rf vendor/github.com/mongodb/amboy/vendor/github.com/mongodb/grip/
 	rm -rf vendor/github.com/mongodb/amboy/vendor/github.com/pkg/errors/
-	rm -rf vendor/github.com/mongodb/amboy/vendor/github.com/davecgh/
 	rm -rf vendor/github.com/mongodb/amboy/vendor/github.com/tychoish/gimlet/vendor/github.com/gorilla/
 	rm -rf vendor/github.com/mongodb/amboy/vendor/github.com/tychoish/gimlet/vendor/github.com/tylerb/graceful/
 	rm -rf vendor/github.com/mongodb/amboy/vendor/github.com/tychoish/gimlet/vendor/github.com/urfave/negroni/
+	rm -rf vendor/github.com/docker/docker/vendor/golang.org/x/net/
 	rm -rf vendor/github.com/docker/docker/vendor/github.com/docker/go-connections/
-	rm -rf vendor/github.com/docker/docker/vendor/github.com/Microsoft/go-winio
+	rm -rf vendor/github.com/docker/docker/vendor/github.com/Microsoft/go-winio/
+	rm -rf vendor/github.com/gorilla/csrf/vendor/github.com/gorilla/context/
+	rm -rf vendor/github.com/gorilla/csrf/vendor/github.com/pkg/
 phony += vendor-clean
 # end vendoring tooling configuration
 
@@ -218,8 +209,7 @@ phony += vendor-clean
 #    run. (The "build" target is intentional and makes these targetsb
 #    rerun as expected.)
 testRunDeps := $(name)
-testTimeout := --test.timeout=10m
-testArgs := -test.v $(testTimeout)
+testArgs := -test.v
 testRunEnv := EVGHOME=$(shell pwd)
 ifeq ($(OS),Windows_NT)
 testRunEnv := EVGHOME=$(shell cygpath -m `pwd`)
@@ -232,6 +222,14 @@ testArgs += -test.run='$(RUN_TEST)'
 endif
 ifneq (,$(RUN_CASE))
 testArgs += -testify.m='$(RUN_CASE)'
+endif
+ifneq (,$(RUN_COUNT))
+testArgs += -test.count='$(RUN_COUNT)'
+endif
+ifneq (,$(TEST_TIMEOUT))
+testArgs += -test.timeout=$(TEST_TIMEOUT)
+else
+testArgs += -test.timeout=10m
 endif
 #  targets to compile
 $(buildDir)/test.%:$(testSrcFiles)

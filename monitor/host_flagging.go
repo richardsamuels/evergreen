@@ -7,27 +7,26 @@ import (
 	"github.com/evergreen-ci/evergreen/cloud/providers"
 	"github.com/evergreen-ci/evergreen/model/distro"
 	"github.com/evergreen-ci/evergreen/model/host"
-	"github.com/mongodb/grip"
 	"github.com/pkg/errors"
 )
 
 const (
 	// ProvisioningCutoff is the threshold to consider as too long for a host to take provisioning
-	ProvisioningCutoff = 50 * time.Minute
+	ProvisioningCutoff = 25 * time.Minute
 
 	// UnreachableCutoff is the threshold to wait for an unreachable host to become marked
 	// as reachable again before giving up and terminating it.
-	UnreachableCutoff = 10 * time.Minute
+	UnreachableCutoff = 5 * time.Minute
 
 	// IdleTimeCutoff is the amount of time we wait for an idle host to be marked as idle.
-	IdleTimeCutoff = 15 * time.Minute
+	IdleTimeCutoff = 7 * time.Minute
 
 	// MaxTimeNextPayment is the amount of time we wait to have left before marking a host as idle
 	MaxTimeTilNextPayment = 5 * time.Minute
 
 	// CommunicationTimeCutoff is the limit to how much time has passed before the host is marked as idle
 	// due to the agent not being able to communicate with the API server.
-	CommunicationTimeCutoff = 10 * time.Minute
+	CommunicationTimeCutoff = 7 * time.Minute
 )
 
 type hostFlagger struct {
@@ -94,7 +93,7 @@ func flagIdleHosts(d []distro.Distro, s *evergreen.Settings) ([]host.Host, error
 		idleTime := freeHost.IdleTime()
 
 		// if the communication time is > 10 mins then there may not be an agent on the host.
-		communicationTime := time.Since(freeHost.LastCommunicationTime)
+		communicationTime := freeHost.GetElapsedCommunicationTime()
 
 		// get a cloud manager for the host
 		cloudManager, err := providers.GetCloudManager(freeHost.Provider, s)
@@ -175,9 +174,6 @@ func flagExcessHosts(distros []distro.Distro, s *evergreen.Settings) ([]host.Hos
 					break
 				}
 			}
-
-			grip.Infof("Found %d excess hosts for distro %s", counter, d.Id)
-
 		}
 
 	}

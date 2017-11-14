@@ -8,6 +8,7 @@ import (
 	"github.com/evergreen-ci/evergreen/db"
 	"github.com/evergreen-ci/evergreen/model/distro"
 	"github.com/evergreen-ci/evergreen/model/event"
+	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/evergreen-ci/evergreen/util"
 	"github.com/mongodb/grip"
 	"github.com/pkg/errors"
@@ -35,6 +36,8 @@ type Host struct {
 
 	// the task that is currently running on the host
 	RunningTask string `bson:"running_task,omitempty" json:"running_task,omitempty"`
+	// the full task struct that is running on the host (only populated by certain aggregations)
+	RunningTaskFull *task.Task `bson:"task_full,omitempty" json:"task_full,omitempty"`
 
 	// the pid of the task that is currently running on the host
 	Pid string `bson:"pid" json:"pid"`
@@ -42,8 +45,10 @@ type Host struct {
 	// duplicate of the DispatchTime field in the above task
 	TaskDispatchTime time.Time `bson:"task_dispatch_time" json:"task_dispatch_time"`
 	ExpirationTime   time.Time `bson:"expiration_time,omitempty" json:"expiration_time"`
-	CreationTime     time.Time `bson:"creation_time" json:"creation_time"`
-	TerminationTime  time.Time `bson:"termination_time" json:"termination_time"`
+	// creation is when the host document was inserted to the DB, start is when it was started on the cloud provider
+	CreationTime    time.Time `bson:"creation_time" json:"creation_time"`
+	StartTime       time.Time `bson:"start_time" json:"start_time"`
+	TerminationTime time.Time `bson:"termination_time" json:"termination_time"`
 
 	LastTaskCompletedTime time.Time `bson:"last_task_completed_time" json:"last_task_completed_time"`
 	LastTaskCompleted     string    `bson:"last_task" json:"last_task"`
@@ -54,6 +59,7 @@ type Host struct {
 	// True if this host was created manually by a user (i.e. with spawnhost)
 	UserHost      bool   `bson:"user_host" json:"user_host"`
 	AgentRevision string `bson:"agent_revision" json:"agent_revision"`
+	NeedsNewAgent bool   `bson:"needs_agent" json:"needs_agent"`
 	// for ec2 dynamic hosts, the instance type requested
 	InstanceType string `bson:"instance_type" json:"instance_type,omitempty"`
 	// stores information on expiration notifications for spawn hosts
@@ -83,15 +89,15 @@ type ProvisionOptions struct {
 	OwnerId string `bson:"owner_id" json:"owner_id"`
 }
 
-type HostStatsByDistro struct {
+type StatsByDistro struct {
 	// ID of the distro the below stats are for
-	Distro string `bson:"distro"`
+	Distro string `bson:"distro" json:"distro,omitempty"`
 	// Host status that the below stats are for
-	Status string `bson:"status"`
+	Status string `bson:"status" json:"status"`
 	// Number of hosts in this status
-	Count int `bson:"count"`
+	Count int `bson:"count" json:"count"`
 	// Number of tasks running on hosts in the above group (should only be nonzero for running hosts)
-	NumTasks int `bson:"num_tasks_running"`
+	NumTasks int `bson:"num_tasks_running" json:"num_tasks_running"`
 }
 
 const (
@@ -310,13 +316,10 @@ func (h *Host) MarkAsProvisioned() error {
 // ClearRunningTask unsets the running task key on the host and updates the last task
 // completed fields.
 func (host *Host) ClearRunningTask(prevTaskId string, finishTime time.Time) error {
-	host.LastTaskCompleted = prevTaskId
-	host.LastTaskCompletedTime = finishTime
-	host.RunningTask = ""
-	event.LogHostRunningTaskCleared(host.Id, prevTaskId)
-	return UpdateOne(
+	err := UpdateOne(
 		bson.M{
-			IdKey: host.Id,
+			IdKey:          host.Id,
+			RunningTaskKey: host.RunningTask,
 		},
 		bson.M{
 			"$set": bson.M{
@@ -328,6 +331,16 @@ func (host *Host) ClearRunningTask(prevTaskId string, finishTime time.Time) erro
 			},
 		})
 
+	if err != nil {
+		return err
+	}
+
+	event.LogHostRunningTaskCleared(host.Id, prevTaskId)
+	host.RunningTask = ""
+	host.LastTaskCompleted = prevTaskId
+	host.LastTaskCompletedTime = finishTime
+
+	return nil
 }
 
 // UpdateRunningTask takes two id strings - an old task and a new one - finds
@@ -376,6 +389,17 @@ func (h *Host) SetAgentRevision(agentRevision string) error {
 		return err
 	}
 	h.AgentRevision = agentRevision
+	return nil
+}
+
+// SetNeedsNewAgent sets the "needs new agent" flag on the host
+func (h *Host) SetNeedsNewAgent(needsAgent bool) error {
+	err := UpdateOne(bson.M{IdKey: h.Id},
+		bson.M{"$set": bson.M{NeedsNewAgentKey: needsAgent}})
+	if err != nil {
+		return err
+	}
+	h.NeedsNewAgent = true
 	return nil
 }
 
@@ -507,6 +531,7 @@ func (h *Host) Upsert() (*mgo.ChangeInfo, error) {
 				ZoneKey:             h.Zone,
 				ProjectKey:          h.Project,
 				ProvisionOptionsKey: h.ProvisionOptions,
+				StartTimeKey:        h.StartTime,
 			},
 			"$setOnInsert": bson.M{
 				StatusKey:     h.Status,
@@ -528,6 +553,20 @@ func (h *Host) Remove() error {
 			IdKey: h.Id,
 		},
 	)
+}
+
+// GetElapsedCommunicationTime returns how long since this host has communicated with evergreen or vice versa
+func (h *Host) GetElapsedCommunicationTime() time.Duration {
+	if h.LastCommunicationTime.After(h.CreationTime) {
+		return time.Since(h.LastCommunicationTime)
+	}
+	if h.StartTime.After(h.CreationTime) {
+		return time.Since(h.StartTime)
+	}
+	if !h.LastCommunicationTime.IsZero() {
+		return time.Since(h.LastCommunicationTime)
+	}
+	return time.Since(h.CreationTime)
 }
 
 func DecommissionHostsWithDistroId(distroId string) error {
@@ -581,10 +620,10 @@ func (h *Host) UpdateDocumentID(newID string) (*Host, error) {
 	return host, nil
 }
 
-// GetHostStatsByDistro returns counts of up hosts broken down by distro
-func GetHostStatsByDistro() ([]HostStatsByDistro, error) {
-	stats := []HostStatsByDistro{}
-	if err := db.Aggregate(Collection, hostStatsByDistroPipeline(), &stats); err != nil {
+// GetStatsByDistro returns counts of up hosts broken down by distro
+func GetStatsByDistro() ([]StatsByDistro, error) {
+	stats := []StatsByDistro{}
+	if err := db.Aggregate(Collection, statsByDistroPipeline(), &stats); err != nil {
 		return nil, err
 	}
 	return stats, nil

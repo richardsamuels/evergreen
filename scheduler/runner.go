@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"context"
 	"time"
 
 	"github.com/evergreen-ci/evergreen"
@@ -10,7 +11,6 @@ import (
 	"github.com/mongodb/grip/message"
 	"github.com/mongodb/grip/sometimes"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 // Runner runs the scheduler process.
@@ -30,13 +30,13 @@ func (r *Runner) Run(ctx context.Context, config *evergreen.Settings) error {
 		return errors.Wrap(err, "error retrieving admin settings")
 	}
 	if adminSettings.ServiceFlags.SchedulerDisabled {
-		grip.Info(message.Fields{
+		grip.InfoWhen(sometimes.Percent(evergreen.DegradedLoggingPercent), message.Fields{
 			"runner":  RunnerName,
 			"message": "scheduler is disabled, exiting",
 		})
 		return nil
 	}
-	grip.InfoWhen(sometimes.Percent(evergreen.DegradedLoggingPercent), message.Fields{
+	grip.Info(message.Fields{
 		"runner":  RunnerName,
 		"status":  "starting",
 		"time":    startTime,
@@ -45,11 +45,22 @@ func (r *Runner) Run(ctx context.Context, config *evergreen.Settings) error {
 
 	schedulerInstance := &Scheduler{
 		config,
-		&DBTaskFinder{},
 		&CmpBasedTaskPrioritizer{},
 		&DBTaskDurationEstimator{},
 		&DBTaskQueuePersister{},
 		&DurationBasedHostAllocator{},
+		LegacyFindRunnableTasks,
+	}
+
+	switch config.Scheduler.TaskFinder {
+	case "parallel":
+		schedulerInstance.FindRunnableTasks = ParallelTaskFinder
+	case "legacy":
+		schedulerInstance.FindRunnableTasks = LegacyFindRunnableTasks
+	case "pipeline":
+		schedulerInstance.FindRunnableTasks = RunnableTasksPipeline
+	case "alternate":
+		schedulerInstance.FindRunnableTasks = AlternateTaskFinder
 	}
 
 	if err := schedulerInstance.Schedule(ctx); err != nil {

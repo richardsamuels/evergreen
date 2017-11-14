@@ -1,6 +1,7 @@
 package command
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -17,7 +18,6 @@ import (
 	"github.com/mitchellh/mapstructure"
 	"github.com/mongodb/grip"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 // A plugin command to put a resource to an s3 bucket and download it to
@@ -122,7 +122,7 @@ func (s3pc *s3put) validate() error {
 		catcher.Add(errors.New("cannot use absolute path with local_files_include_filter"))
 	}
 
-	if !util.SliceContains(artifact.ValidVisibilities, s3pc.Visibility) {
+	if !util.StringSliceContains(artifact.ValidVisibilities, s3pc.Visibility) {
 		catcher.Add(errors.Errorf("invalid visibility setting: %v", s3pc.Visibility))
 	}
 
@@ -164,7 +164,7 @@ func (s3pc *s3put) shouldRunForVariant(buildVariantName string) bool {
 	}
 
 	//Only run if the buildvariant specified appears in our list.
-	return util.SliceContains(s3pc.BuildVariants, buildVariantName)
+	return util.StringSliceContains(s3pc.BuildVariants, buildVariantName)
 }
 
 // Implementation of Execute.  Expands the parameters, and then puts the

@@ -3,17 +3,19 @@
 package docker
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"time"
 
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/cloud"
-	"github.com/evergreen-ci/evergreen/db/bsonutil"
 	"github.com/evergreen-ci/evergreen/hostutil"
 	"github.com/evergreen-ci/evergreen/model/distro"
+	"github.com/evergreen-ci/evergreen/model/event"
 	"github.com/evergreen-ci/evergreen/model/host"
 	"github.com/mitchellh/mapstructure"
+	"github.com/mongodb/anser/bsonutil"
 	"github.com/mongodb/grip"
 	"github.com/mongodb/grip/message"
 	"github.com/pkg/errors"
@@ -145,6 +147,7 @@ func (m *Manager) SpawnHost(h *host.Host) (*host.Host, error) {
 		"message":   "created and started Docker container",
 		"container": h.Id,
 	})
+	event.LogHostStarted(h.Id)
 
 	// Retrieve container details
 	newContainer, err := m.client.GetContainer(h)
@@ -242,7 +245,7 @@ func (m *Manager) IsSSHReachable(h *host.Host, keyPath string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return hostutil.CheckSSHResponse(h, sshOpts)
+	return hostutil.CheckSSHResponse(context.TODO(), h, sshOpts)
 }
 
 //IsUp checks the container's state by querying the Docker API and

@@ -1,6 +1,7 @@
 package ec2
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/evergreen-ci/evergreen/cloud"
 	"github.com/evergreen-ci/evergreen/hostutil"
 	"github.com/evergreen-ci/evergreen/model/distro"
+	"github.com/evergreen-ci/evergreen/model/event"
 	"github.com/evergreen-ci/evergreen/model/host"
 	"github.com/evergreen-ci/evergreen/util"
 	"github.com/goamz/goamz/aws"
@@ -32,6 +34,7 @@ const (
 	EC2StatusShuttingdown = "shutting-down"
 	EC2StatusTerminated   = "terminated"
 	EC2StatusStopped      = "stopped"
+	EC2ErrorNotFound      = "InvalidInstanceID.NotFound"
 )
 
 type EC2ProviderSettings struct {
@@ -93,11 +96,12 @@ func (cloudManager *EC2Manager) IsSSHReachable(host *host.Host, keyPath string) 
 	if err != nil {
 		return false, err
 	}
-	return hostutil.CheckSSHResponse(host, sshOpts)
+	return hostutil.CheckSSHResponse(context.TODO(), host, sshOpts)
 }
 
 func (cloudManager *EC2Manager) GetInstanceStatus(host *host.Host) (cloud.CloudStatus, error) {
-	ec2Handle := getUSEast(*cloudManager.awsCredentials)
+	ec2Handle, client := getUSEast(*cloudManager.awsCredentials)
+	defer util.PutHttpClient(client)
 	instanceInfo, err := getInstanceInfo(ec2Handle, host.Id)
 	if err != nil {
 		return cloud.StatusUnknown, err
@@ -124,7 +128,8 @@ func (cloudManager *EC2Manager) SpawnHost(h *host.Host) (*host.Host, error) {
 		return nil, errors.Errorf("Can't spawn instance of %v for distro %v: provider is %v", OnDemandProviderName, h.Distro.Id, h.Distro.Provider)
 	}
 
-	ec2Handle := getUSEast(*cloudManager.awsCredentials)
+	ec2Handle, client := getUSEast(*cloudManager.awsCredentials)
+	defer util.PutHttpClient(client)
 
 	//Decode and validate the ProviderSettings into the ec2-specific ones.
 	ec2Settings := &EC2ProviderSettings{}
@@ -191,12 +196,15 @@ func (cloudManager *EC2Manager) SpawnHost(h *host.Host) (*host.Host, error) {
 		return nil, err
 	}
 	grip.Debugf("attached tags for '%s'", instance.InstanceId)
+	event.LogHostStarted(newHost.Id)
 
 	return newHost, nil
 }
 
 func (cloudManager *EC2Manager) IsUp(host *host.Host) (bool, error) {
-	ec2Handle := getUSEast(*cloudManager.awsCredentials)
+	ec2Handle, client := getUSEast(*cloudManager.awsCredentials)
+	defer util.PutHttpClient(client)
+
 	instanceInfo, err := getInstanceInfo(ec2Handle, host.Id)
 	if err != nil {
 		return false, errors.WithStack(err)
@@ -213,7 +221,9 @@ func (cloudManager *EC2Manager) OnUp(host *host.Host) error {
 }
 
 func (cloudManager *EC2Manager) GetDNSName(host *host.Host) (string, error) {
-	ec2Handle := getUSEast(*cloudManager.awsCredentials)
+	ec2Handle, client := getUSEast(*cloudManager.awsCredentials)
+	defer util.PutHttpClient(client)
+
 	instanceInfo, err := getInstanceInfo(ec2Handle, host.Id)
 	if err != nil {
 		return "", err
@@ -230,9 +240,10 @@ func (cloudManager *EC2Manager) TerminateInstance(host *host.Host) error {
 		return err
 	}
 
-	ec2Handle := getUSEast(*cloudManager.awsCredentials)
-	resp, err := ec2Handle.TerminateInstances([]string{host.Id})
+	ec2Handle, client := getUSEast(*cloudManager.awsCredentials)
+	defer util.PutHttpClient(client)
 
+	resp, err := ec2Handle.TerminateInstances([]string{host.Id})
 	if err != nil {
 		return err
 	}
@@ -324,7 +335,9 @@ func (cloudManager *EC2Manager) CostForDuration(h *host.Host, start, end time.Ti
 		return 0, errors.New("task timing data is malformed")
 	}
 	// grab instance details from EC2
-	ec2Handle := getUSEast(*cloudManager.awsCredentials)
+	ec2Handle, client := getUSEast(*cloudManager.awsCredentials)
+	defer util.PutHttpClient(client)
+
 	instance, err := getInstanceInfo(ec2Handle, h.Id)
 	if err != nil {
 		return 0, errors.WithStack(err)

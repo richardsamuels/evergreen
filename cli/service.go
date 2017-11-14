@@ -1,23 +1,27 @@
 package cli
 
 import (
+	"fmt"
 	htmlTemplate "html/template"
 	"net/http"
 	"path/filepath"
 	textTemplate "text/template"
 	"time"
 
+	"context"
+
 	"github.com/evergreen-ci/evergreen"
-	"github.com/evergreen-ci/evergreen/db"
 	"github.com/evergreen-ci/evergreen/service"
-	"github.com/evergreen-ci/evergreen/util"
+	"github.com/evergreen-ci/evergreen/units"
 	"github.com/evergreen-ci/render"
+	"github.com/gorilla/csrf"
+	"github.com/gorilla/mux"
+	"github.com/mongodb/amboy"
 	"github.com/mongodb/grip"
-	"github.com/mongodb/grip/level"
 	"github.com/mongodb/grip/message"
+	"github.com/mongodb/grip/recovery"
 	"github.com/pkg/errors"
 	"github.com/urfave/negroni"
-	"golang.org/x/net/context"
 )
 
 var (
@@ -33,87 +37,81 @@ type ServiceWebCommand struct {
 }
 
 func (c *ServiceWebCommand) Execute(_ []string) error {
-	settings, err := evergreen.NewSettings(c.ConfigPath)
-	if err != nil {
-		return errors.Wrap(err, "problem getting settings")
-	}
+	ctx, cancel := context.WithCancel(context.Background())
 
-	if err = settings.Validate(); err != nil {
-		return errors.Wrap(err, "problem validating settings")
-	}
+	env := evergreen.GetEnvironment()
+	grip.CatchEmergencyFatal(errors.Wrap(env.Configure(ctx, c.ConfigPath), "problem configuring application environment"))
 
-	db.SetGlobalSessionProvider(db.SessionFactoryFromConfig(settings))
+	settings := env.Settings()
+	sender, err := settings.GetSender(env)
+	grip.CatchEmergencyFatal(err)
+	grip.CatchEmergencyFatal(grip.SetSender(sender))
 
-	apiHandler, err := getHandlerAPI(settings)
+	defer sender.Close()
+	defer recovery.LogStackTraceAndExit("evergreen service")
+	defer cancel()
+
+	grip.SetName("evergreen.service")
+	grip.Notice(message.Fields{"build": evergreen.BuildRevision, "process": grip.Name()})
+
+	amboy.IntervalQueueOperation(ctx, env.LocalQueue(), 15*time.Second, time.Now(), true, func(queue amboy.Queue) error {
+		return queue.Put(units.NewSysInfoStatsCollector(fmt.Sprintf("sys-info-stats-%d", time.Now().Unix())))
+	})
+
+	router := mux.NewRouter()
+
+	apiHandler, err := getHandlerAPI(settings, router)
 	if err != nil {
 		return errors.WithStack(err)
 	}
 
-	uiHandler, err := getHandlerUI(settings)
+	uiHandler, err := getHandlerUI(settings, router)
 	if err != nil {
 		return errors.WithStack(err)
 	}
 
 	pprofHandler := service.GetHandlerPprof(settings)
 
-	sender, err := settings.GetSender()
-	if err != nil {
-		return errors.WithStack(err)
-	}
-	defer sender.Close()
-
-	if err = grip.SetSender(sender); err != nil {
-		return errors.Wrap(err, "problem setting up logger")
-	}
-
-	defer util.RecoverAndLogStackTrace()
-
-	grip.SetName("evergreen.service")
-	grip.Warning(grip.SetDefaultLevel(level.Info))
-	grip.Warning(grip.SetThreshold(level.Debug))
-
-	grip.Notice(message.Fields{"build": evergreen.BuildRevision, "process": grip.Name()})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go evergreen.SystemInfoCollector(ctx)
-
+	catcher := grip.NewBasicCatcher()
 	apiWait := make(chan struct{})
 	go func() {
-		err = service.RunGracefully(settings.Api.HttpListenAddr, requestTimeout, apiHandler)
+		catcher.Add(service.RunGracefully(settings.Api.HttpListenAddr, requestTimeout, apiHandler))
 		close(apiWait)
 	}()
 
 	uiWait := make(chan struct{})
 	go func() {
-		err = service.RunGracefully(settings.Ui.HttpListenAddr, requestTimeout, uiHandler)
+		if settings.Ui.CsrfKey != "" {
+			errorHandler := csrf.ErrorHandler(http.HandlerFunc(service.ForbiddenHandler))
+			uiHandler = csrf.Protect([]byte(settings.Ui.CsrfKey), errorHandler)(uiHandler)
+		}
+		catcher.Add(service.RunGracefully(settings.Ui.HttpListenAddr, requestTimeout, uiHandler))
 		close(uiWait)
 	}()
+
 	pprofWait := make(chan struct{})
-	if settings.PprofPort != "" {
-		go func() {
-			err = service.RunGracefully(settings.PprofPort, requestTimeout, pprofHandler)
-			close(pprofWait)
-		}()
-	} else {
+	go func() {
+		if settings.PprofPort != "" {
+			catcher.Add(service.RunGracefully(settings.PprofPort, requestTimeout, pprofHandler))
+		}
 		close(pprofWait)
-	}
+	}()
 
 	<-apiWait
 	<-uiWait
 	<-pprofWait
 
-	return err
+	return catcher.Resolve()
 }
 
-func getHandlerAPI(settings *evergreen.Settings) (http.Handler, error) {
+func getHandlerAPI(settings *evergreen.Settings, router *mux.Router) (http.Handler, error) {
 	as, err := service.NewAPIServer(settings)
 	if err != nil {
 		err = errors.Wrap(err, "failed to create API server")
 		return nil, err
 	}
 
-	router := as.NewRouter()
+	as.AttachRoutes(router)
 
 	n := negroni.New()
 	n.Use(service.NewLogger())
@@ -122,7 +120,7 @@ func getHandlerAPI(settings *evergreen.Settings) (http.Handler, error) {
 	return n, nil
 }
 
-func getHandlerUI(settings *evergreen.Settings) (http.Handler, error) {
+func getHandlerUI(settings *evergreen.Settings, router *mux.Router) (http.Handler, error) {
 	home := evergreen.FindEvergreenHome()
 	if home == "" {
 		return nil, errors.New("EVGHOME environment variable must be set to run UI server")
@@ -133,7 +131,7 @@ func getHandlerUI(settings *evergreen.Settings) (http.Handler, error) {
 		return nil, errors.Wrap(err, "failed to create UI server")
 	}
 
-	router, err := uis.NewRouter()
+	err = uis.AttachRoutes(router)
 	if err != nil {
 		return nil, errors.Wrap(err, "problem creating router")
 	}

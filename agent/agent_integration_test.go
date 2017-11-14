@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
@@ -13,7 +14,6 @@ import (
 	"github.com/evergreen-ci/evergreen/service"
 	"github.com/evergreen-ci/evergreen/testutil"
 	"github.com/stretchr/testify/suite"
-	"golang.org/x/net/context"
 )
 
 func createAgent(testServer *service.TestServer, testHost *host.Host) *Agent {
@@ -21,7 +21,7 @@ func createAgent(testServer *service.TestServer, testHost *host.Host) *Agent {
 		HostID:            testHost.Id,
 		HostSecret:        testHost.Secret,
 		StatusPort:        2285,
-		LogPrefix:         evergreen.LocalLoggingOverride,
+		LogPrefix:         "--",
 		HeartbeatInterval: 5 * time.Second,
 	}
 
@@ -43,9 +43,32 @@ func TestAgentIntegrationSuite(t *testing.T) {
 }
 
 func (s *AgentIntegrationSuite) SetupSuite() {
+	s.testDirectory = testutil.GetDirectoryOfFile()
+}
+
+func (s *AgentIntegrationSuite) SetupTest() {
+	var err error
+
 	s.testConfig = testutil.TestConfig()
 	testutil.ConfigureIntegrationTest(s.T(), s.testConfig, "AgentIntegrationSuite")
-	dbutil.SetGlobalSessionProvider(dbutil.SessionFactoryFromConfig(s.testConfig))
+
+	dbutil.SetGlobalSessionProvider(s.testConfig.SessionFactory())
+
+	s.Require().NoError(modelutil.CleanupAPITestData())
+	s.modelData, err = modelutil.SetupAPITestData(s.testConfig, "print_dir_task", "linux-64", filepath.Join(s.testDirectory, "testdata/agent-integration.yml"), modelutil.NoPatch)
+	s.Require().NoError(err)
+
+	s.testServer, err = service.CreateTestServer(s.testConfig, nil)
+	s.Require().NoError(err)
+
+	s.a = createAgent(s.testServer, s.modelData.Host)
+	s.tc = &taskContext{
+		task: client.TaskData{
+			ID:     s.modelData.Task.Id,
+			Secret: s.modelData.Task.Secret,
+		},
+	}
+	s.a.removeTaskDirectory(s.tc)
 }
 
 func (s *AgentIntegrationSuite) TearDownTest() {
@@ -54,62 +77,20 @@ func (s *AgentIntegrationSuite) TearDownTest() {
 	}
 }
 
-func (s *AgentIntegrationSuite) TestRunTask() {
-	var err error
-	s.testDirectory = testutil.GetDirectoryOfFile()
-	s.modelData, err = modelutil.SetupAPITestData(s.testConfig, "print_dir_task", "linux-64", filepath.Join(s.testDirectory, "testdata/agent-integration.yml"), modelutil.NoPatch)
-	testutil.HandleTestingErr(err, s.T(), "Couldn't make test data: %v", err)
-	testServer, err := service.CreateTestServer(s.testConfig, nil)
-	testutil.HandleTestingErr(err, s.T(), "Couldn't create apiserver: %v", err)
-	defer testServer.Close()
-	s.testServer = testServer
-
-	s.a = createAgent(testServer, s.modelData.Host)
-	s.tc = &taskContext{
-		task: client.TaskData{
-			ID:     s.modelData.Task.Id,
-			Secret: s.modelData.Task.Secret,
-		},
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	err = s.a.resetLogging(ctx, s.tc)
-	s.NoError(err)
-	err = s.a.runTask(ctx, s.tc)
-	s.NoError(err)
-}
-
 func (s *AgentIntegrationSuite) TestAbortTask() {
-	var err error
-	s.testDirectory = testutil.GetDirectoryOfFile()
-	s.modelData, err = modelutil.SetupAPITestData(s.testConfig, "very_slow_task", "linux-64", filepath.Join(s.testDirectory, "testdata/agent-integration.yml"), modelutil.NoPatch)
-	testutil.HandleTestingErr(err, s.T(), "Couldn't make test data: %v", err)
-	testServer, err := service.CreateTestServer(s.testConfig, nil)
-	testutil.HandleTestingErr(err, s.T(), "Couldn't create apiserver: %v", err)
-	defer testServer.Close()
-	s.testServer = testServer
-
-	s.a = createAgent(testServer, s.modelData.Host)
-	s.tc = &taskContext{
-		task: client.TaskData{
-			ID:     s.modelData.Task.Id,
-			Secret: s.modelData.Task.Secret,
-		},
-	}
-
 	errChan := make(chan error)
-	ctx, cancel := context.WithCancel(context.Background())
+
+	ctx := context.Background()
+	tskCtx, cancel := context.WithCancel(ctx)
+	lgrCtx, lgrCancel := context.WithCancel(ctx)
+	defer lgrCancel()
 	go func() {
-		err = s.a.resetLogging(ctx, s.tc)
-		if err != nil {
+		if err := s.a.resetLogging(lgrCtx, s.tc); err != nil {
 			errChan <- err
 			return
 		}
-		err = s.a.runTask(ctx, s.tc)
-		errChan <- err
+		errChan <- s.a.runTask(tskCtx, s.tc)
 	}()
 	cancel()
-	err = <-errChan
-	s.Error(err)
+	s.Error(<-errChan)
 }

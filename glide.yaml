@@ -1,21 +1,15 @@
 package: github.com/evergreen-ci/evergreen
 import:
   - package: golang.org/x/crypto
-    subpackages:
-      - ssh
   - package: golang.org/x/net
-    subpackages:
-      - context
-  - package: github.com/pkg/sftp
+  - package: golang.org/x/oauth2
+  - package: golang.org/x/sys/windows
   - package: github.com/vaughan0/go-ini
   - package: github.com/10gen/goamz/
     subpackages:
       - s3
       - ec2
       - aws
-  - package: github.com/10gen-labs/slogger/
-    subpackages:
-      - v1
   - package: github.com/codegangsta/inject
   - package: github.com/docker/docker
   - package: github.com/docker/go-connections
@@ -28,9 +22,6 @@ import:
   - package: github.com/smartystreets/assertions
   - package: github.com/smartystreets/goconvey
   - package: github.com/stretchr/testify
-  - package: github.com/stretchr/objx
-  - package: github.com/pmezard/go-difflib
-  - package: github.com/davecgh/go-spew
   - package: github.com/jtolds/gls
   - package: gopkg.in/yaml.v2
   - package: github.com/dynport/gocloud
@@ -57,8 +48,8 @@ import:
     subpackages:
       - compute
   - package: github.com/vmware/govmomi
-  - package: golang.org/x/oauth2
-  - package: golang.org/x/sys/windows
   - package: github.com/mongodb/anser
   - package: github.com/mongodb/amboy
   - package: github.com/tychoish/tarjan
+  - package: github.com/google/go-github
+  - package: github.com/google/go-querystring

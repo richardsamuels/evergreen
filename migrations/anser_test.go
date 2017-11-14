@@ -1,9 +1,8 @@
 package migrations
 
 import (
+	"context"
 	"testing"
-
-	"golang.org/x/net/context"
 
 	"github.com/mongodb/anser"
 	"github.com/mongodb/anser/mock"
@@ -12,9 +11,8 @@ import (
 
 func TestAnserBasicPlaceholder(t *testing.T) {
 	assert := assert.New(t)
-	app, err := Application(&mock.Environment{})
+	app, err := Application(mock.NewEnvironment(), "mci_test")
 	assert.NoError(err)
-	assert.Len(app.Generators, 0)
 	assert.False(app.DryRun)
 
 	env, err := Setup(context.Background(), "mongodb://localhost:27017")

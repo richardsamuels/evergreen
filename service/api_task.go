@@ -18,6 +18,7 @@ import (
 	"github.com/evergreen-ci/evergreen/taskrunner"
 	"github.com/evergreen-ci/evergreen/util"
 	"github.com/mongodb/grip"
+	"github.com/mongodb/grip/message"
 	"github.com/mongodb/grip/sometimes"
 	"github.com/pkg/errors"
 )
@@ -185,9 +186,9 @@ func (as *APIServer) EndTask(w http.ResponseWriter, r *http.Request) {
 
 	shouldExit, message := checkHostHealth(currentHost, agentRevision)
 	if shouldExit {
-		// set the host's last communication time to be zero
-		if err := currentHost.ResetLastCommunicated(); err != nil {
-			grip.Errorf("error resetting last communication time for host %s: %+v", currentHost.Id, err)
+		// set the needs new agent flag on the host
+		if err := currentHost.SetNeedsNewAgent(true); err != nil {
+			grip.Errorf("error indicating host %s needs new agent: %+v", currentHost.Id, err)
 			as.WriteJSON(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -253,16 +254,40 @@ func assignNextAvailableTask(taskQueue *model.TaskQueue, currentHost *host.Host)
 		// validate that the task can be run, if not fetch the next one in
 		// the queue.
 		if !nextTask.IsDispatchable() {
-			grip.Warningf("Skipping task %s, which was "+
-				"picked up to be run but is not runnable - "+
-				"status (%s) activated (%t)", nextTask.Id, nextTask.Status,
-				nextTask.Activated)
+			grip.Warning(message.Fields{
+				"message":   "skipping un-dispatchable task",
+				"task_id":   nextTask.Id,
+				"status":    nextTask.Status,
+				"activated": nextTask.Activated,
+				"host":      currentHost.Id,
+			})
 			continue
 		}
+
+		projectRef, err := model.FindOneProjectRef(nextTask.Project)
+		if err != nil || projectRef == nil {
+			grip.Warning(message.Fields{
+				"task_id": nextTask.Id,
+				"message": "could not find project ref for next task, skipping",
+				"project": nextTask.Project,
+				"host":    currentHost.Id,
+			})
+			continue
+		}
+
+		if !projectRef.Enabled {
+			grip.Warning(message.Fields{
+				"task_id": nextTask.Id,
+				"project": nextTask.Project,
+				"host":    currentHost.Id,
+				"message": "skipping task because of disabled project",
+			})
+			continue
+		}
+
 		// attempt to update the host. TODO: double check Last task completed thing...
 		// TODO: get rid of last task completed field in update running task.
 		ok, err := currentHost.UpdateRunningTask(currentHost.LastTaskCompleted, nextTaskId, time.Now())
-
 		if err != nil {
 			return nil, errors.WithStack(err)
 		}
@@ -305,9 +330,9 @@ func (as *APIServer) NextTask(w http.ResponseWriter, r *http.Request) {
 
 	shouldExit, message := checkHostHealth(h, agentRevision)
 	if shouldExit {
-		// set the host's last communication time to be zero
-		if err = h.ResetLastCommunicated(); err != nil {
-			grip.Errorf("error resetting last communication time for host %s: %+v", h.Id, err)
+		// set the needs new agent flag on the host
+		if err = h.SetNeedsNewAgent(true); err != nil {
+			grip.Errorf("error indicating host %s needs new agent: %+v", h.Id, err)
 			as.WriteJSON(w, http.StatusInternalServerError, err)
 			return
 		}

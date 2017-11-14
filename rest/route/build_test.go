@@ -1,6 +1,7 @@
 package route
 
 import (
+	"context"
 	"testing"
 
 	"github.com/evergreen-ci/evergreen"
@@ -10,7 +11,6 @@ import (
 	"github.com/evergreen-ci/evergreen/rest/data"
 	"github.com/evergreen-ci/evergreen/rest/model"
 	"github.com/stretchr/testify/suite"
-	"golang.org/x/net/context"
 )
 
 ////////////////////////////////////////////////////////////////////////
@@ -47,7 +47,7 @@ func (s *BuildByIdSuite) SetupSuite() {
 func (s *BuildByIdSuite) TestFindByIdProjFound() {
 	rm := getBuildByIdRouteManager("", 2)
 	(rm.Methods[0].RequestHandler).(*buildGetHandler).buildId = "build1"
-	res, err := rm.Methods[0].Execute(nil, s.sc)
+	res, err := rm.Methods[0].Execute(context.TODO(), s.sc)
 	s.NoError(err)
 	s.NotNil(res)
 	s.Equal(1, len(res.Result))
@@ -61,7 +61,7 @@ func (s *BuildByIdSuite) TestFindByIdProjFound() {
 func (s *BuildByIdSuite) TestFindByIdProjNotFound() {
 	rm := getBuildByIdRouteManager("", 2)
 	(rm.Methods[0].RequestHandler).(*buildGetHandler).buildId = "build2"
-	res, err := rm.Methods[0].Execute(nil, s.sc)
+	res, err := rm.Methods[0].Execute(context.TODO(), s.sc)
 	s.NoError(err)
 	s.NotNil(res)
 	s.Equal(1, len(res.Result))
@@ -75,7 +75,7 @@ func (s *BuildByIdSuite) TestFindByIdProjNotFound() {
 func (s *BuildByIdSuite) TestFindByIdFail() {
 	rm := getBuildByIdRouteManager("", 2)
 	(rm.Methods[0].RequestHandler).(*buildGetHandler).buildId = "build3"
-	_, err := rm.Methods[0].Execute(nil, s.sc)
+	_, err := rm.Methods[0].Execute(context.TODO(), s.sc)
 	s.Error(err)
 }
 

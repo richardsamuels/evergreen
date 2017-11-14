@@ -3,10 +3,13 @@
 package gce
 
 import (
+	"context"
+
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/cloud"
 	"github.com/evergreen-ci/evergreen/hostutil"
 	"github.com/evergreen-ci/evergreen/model/distro"
+	"github.com/evergreen-ci/evergreen/model/event"
 	"github.com/evergreen-ci/evergreen/model/host"
 	"github.com/mitchellh/mapstructure"
 	"github.com/mongodb/grip"
@@ -156,7 +159,8 @@ func (m *Manager) SpawnHost(h *host.Host) (*host.Host, error) {
 		return nil, errors.Wrapf(err, "Could not start new instance for distro '%s'", h.Distro.Id)
 	}
 
-	grip.Debugf("New instance: %v", message.Fields{"instance": h.Id, "object": h})
+	event.LogHostStarted(h.Id)
+	grip.Debug(message.Fields{"message": "new gce host", "instance": h.Id, "object": h})
 	return h, nil
 }
 
@@ -213,7 +217,7 @@ func (m *Manager) IsSSHReachable(host *host.Host, keyPath string) (bool, error) 
 		return false, err
 	}
 
-	return hostutil.CheckSSHResponse(host, opts)
+	return hostutil.CheckSSHResponse(context.TODO(), host, opts)
 }
 
 // GetDNSName returns the external IPv4 address of the host.

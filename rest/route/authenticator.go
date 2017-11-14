@@ -1,6 +1,7 @@
 package route
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/evergreen-ci/evergreen"
@@ -8,7 +9,6 @@ import (
 	"github.com/evergreen-ci/evergreen/rest"
 	"github.com/evergreen-ci/evergreen/rest/data"
 	"github.com/evergreen-ci/evergreen/util"
-	"golang.org/x/net/context"
 )
 
 // Authenticator is an interface which defines how requests can authenticate
@@ -60,7 +60,7 @@ func (p *ProjectAdminAuthenticator) Authenticate(ctx context.Context, sc data.Co
 
 	// If either a superuser or admin, request is allowed to proceed.
 	if auth.IsSuperUser(sc.GetSuperUsers(), u) ||
-		util.SliceContains(projCtx.ProjectRef.Admins, u.Username()) {
+		util.StringSliceContains(projCtx.ProjectRef.Admins, u.Username()) {
 		return nil
 	}
 

@@ -4,8 +4,10 @@ import (
 	"github.com/mongodb/amboy"
 	"github.com/mongodb/amboy/job"
 	"github.com/mongodb/amboy/registry"
-	"github.com/pkg/errors"
 	"github.com/mongodb/anser/model"
+	"github.com/mongodb/grip"
+	"github.com/mongodb/grip/message"
+	"github.com/pkg/errors"
 	"gopkg.in/mgo.v2/bson"
 )
 
@@ -41,8 +43,15 @@ type manualMigrationJob struct {
 }
 
 func (j *manualMigrationJob) Run() {
-	defer j.FinishMigration(j.Definition.Migration, &j.Base)
+	grip.Info(message.Fields{
+		"message":   "starting migration",
+		"operation": "manual",
+		"migration": j.Definition.Migration,
+		"target":    j.Definition.ID,
+		"id":        j.ID(),
+	})
 
+	defer j.FinishMigration(j.Definition.Migration, &j.Base)
 	env := j.Env()
 
 	operation, ok := env.GetManualMigrationOperation(j.Definition.OperationName)
@@ -58,7 +67,7 @@ func (j *manualMigrationJob) Run() {
 	}
 	defer session.Close()
 
-	var doc bson.Raw
+	var doc bson.RawD
 	coll := session.DB(j.Definition.Namespace.DB).C(j.Definition.Namespace.Collection)
 	err = coll.FindId(j.Definition.ID).One(&doc)
 	if err != nil {

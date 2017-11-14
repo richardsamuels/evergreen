@@ -1,11 +1,13 @@
 package command
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/evergreen-ci/evergreen/model"
 	"github.com/evergreen-ci/evergreen/model/task"
@@ -13,10 +15,11 @@ import (
 	"github.com/evergreen-ci/evergreen/testutil"
 	"github.com/evergreen-ci/evergreen/util"
 	. "github.com/smartystreets/goconvey/convey"
-	"golang.org/x/net/context"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestShellExecuteCommand(t *testing.T) {
+	assert := assert.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	comm := client.NewMock("http://localhost.com")
@@ -60,6 +63,19 @@ func TestShellExecuteCommand(t *testing.T) {
 			cmd := &shellExec{WorkingDir: path}
 			So(cmd.Execute(ctx, comm, logger, conf), ShouldNotBeNil)
 
+		})
+
+		Convey("canceling the context should cancel the command", func() {
+			cmd := &shellExec{
+				Script:     "sleep 1",
+				WorkingDir: testutil.GetDirectoryOfFile(),
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+			defer cancel()
+
+			err := cmd.Execute(ctx, comm, logger, conf)
+			assert.Contains(err.Error(), "shell command interrupted")
+			assert.NotContains(err.Error(), "error while stopping process")
 		})
 
 	})

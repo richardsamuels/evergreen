@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"context"
 	"runtime"
 	"sync"
 	"time"
@@ -18,18 +19,17 @@ import (
 	"github.com/mongodb/grip"
 	"github.com/mongodb/grip/message"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 // Responsible for prioritizing and scheduling tasks to be run, on a per-distro
 // basis.
 type Scheduler struct {
 	*evergreen.Settings
-	TaskFinder
 	TaskPrioritizer
 	TaskDurationEstimator
 	TaskQueuePersister
 	HostAllocator
+	FindRunnableTasks TaskFinder
 }
 
 // versionBuildVariant is used to keep track of the version/buildvariant fields
@@ -53,12 +53,18 @@ func (s *Scheduler) Schedule(ctx context.Context) error {
 	// find all tasks ready to be run
 	grip.Info("Finding runnable tasks...")
 
+	startAt := time.Now()
 	runnableTasks, err := s.FindRunnableTasks()
 	if err != nil {
 		return errors.Wrap(err, "Error finding runnable tasks")
 	}
 
-	grip.Infof("There are %d tasks ready to be run", len(runnableTasks))
+	grip.Info(message.Fields{
+		"message":  "found runnable tasks",
+		"count":    len(runnableTasks),
+		"duration": time.Since(startAt),
+		"span":     time.Since(startAt).String(),
+	})
 
 	// split the tasks by distro
 	tasksByDistro, taskRunDistros, err := s.splitTasksByDistro(runnableTasks)
@@ -107,7 +113,7 @@ func (s *Scheduler) Schedule(ctx context.Context) error {
 	wg.Add(workers)
 
 	// make a channel to collect all of function results from scheduling the distros
-	distroSchedulerResultChan := make(chan *distroSchedulerResult)
+	distroSchedulerResultChan := make(chan distroSchedulerResult)
 
 	// for each worker, create a new goroutine
 	for i := 0; i < workers; i++ {
@@ -119,7 +125,12 @@ func (s *Scheduler) Schedule(ctx context.Context) error {
 				// schedule the distro
 				res := s.scheduleDistro(d.distroId, d.runnableTasksForDistro, taskExpectedDuration)
 				if res.err != nil {
-					grip.Error(err)
+					grip.Error(message.Fields{
+						"operation": "scheduling distro",
+						"distro":    d.distroId,
+						"runner":    RunnerName,
+						"error":     res.err.Error(),
+					})
 				}
 
 				if ctx.Err() != nil {
@@ -128,13 +139,34 @@ func (s *Scheduler) Schedule(ctx context.Context) error {
 				// write the results out to a results channel
 				distroSchedulerResultChan <- res
 				grip.Info(message.Fields{
-					"runner":     RunnerName,
-					"distro":     d.distroId,
-					"operation":  "scheduling distro",
-					"queue_size": len(d.runnableTasksForDistro),
-					"span":       time.Since(distroStartTime).String(),
-					"duration":   time.Since(distroStartTime),
+					"runner":                 RunnerName,
+					"distro":                 d.distroId,
+					"operation":              "scheduling distro",
+					"queue_size":             len(d.runnableTasksForDistro),
+					"expected_duration":      res.schedulerEvent.ExpectedDuration,
+					"expected_duration_span": res.schedulerEvent.ExpectedDuration.String(),
+					"span":     time.Since(distroStartTime).String(),
+					"duration": time.Since(distroStartTime),
 				})
+				if len(d.runnableTasksForDistro) != len(res.taskQueueItem) {
+					delta := make(map[string]string)
+					for _, t := range res.taskQueueItem {
+						delta[t.Id] = "res.taskQueueItem"
+					}
+					for _, i := range d.runnableTasksForDistro {
+						if delta[i.Id] == "res.taskQueueItem" {
+							delete(delta, i.Id)
+						} else {
+							delta[i.Id] = "d.runnableTasksForDistro"
+						}
+					}
+					grip.Alert(message.Fields{
+						"runner":             RunnerName,
+						"distro":             d.distroId,
+						"message":            "inconsistency with scheduler input and output",
+						"inconsistent_tasks": delta,
+					})
+				}
 			}
 		}()
 	}
@@ -146,16 +178,13 @@ func (s *Scheduler) Schedule(ctx context.Context) error {
 	taskQueueItems := make(map[string][]model.TaskQueueItem)
 
 	resDoneChan := make(chan struct{})
-	var errResult error
+	catcher := grip.NewSimpleCatcher()
 	go func() {
 		defer close(resDoneChan)
 		for res := range distroSchedulerResultChan {
 			if res.err != nil {
-				errResult = errors.Wrapf(err, "error scheduling tasks on distro %v", res.distroId)
-				return
-			}
-			if ctx.Err() != nil {
-				return
+				catcher.Add(errors.Wrapf(res.err, "error scheduling tasks on distro %v", res.distroId))
+				continue
 			}
 			schedulerEvents[res.distroId] = res.schedulerEvent
 			taskQueueItems[res.distroId] = res.taskQueueItem
@@ -164,7 +193,6 @@ func (s *Scheduler) Schedule(ctx context.Context) error {
 
 	if ctx.Err() != nil {
 		return errors.New("scheduling operations canceled")
-
 	}
 	// wait for the distro scheduler goroutines to complete to complete
 	wg.Wait()
@@ -175,8 +203,8 @@ func (s *Scheduler) Schedule(ctx context.Context) error {
 	// wait for the results to be collected
 	<-resDoneChan
 
-	if errResult != nil {
-		return errResult
+	if catcher.HasErrors() {
+		return catcher.Resolve()
 	}
 
 	// split distros by name
@@ -192,7 +220,7 @@ func (s *Scheduler) Schedule(ctx context.Context) error {
 		"operation": "removing stale intent hosts older than 3 minutes",
 	})
 
-	if err := host.RemoveAllStaleInitializing(); err != nil {
+	if err = host.RemoveAllStaleInitializing(); err != nil {
 		return errors.Wrap(err, "problem removing previously intented hosts, before creating new ones.") // nolint:misspell
 	}
 
@@ -236,34 +264,38 @@ func (s *Scheduler) Schedule(ctx context.Context) error {
 		return errors.Wrap(err, "Error spawning new hosts")
 	}
 
-	if len(hostsSpawned) != 0 {
-		grip.Infof("Hosts spawned (%d distros total), by:", len(hostsSpawned))
-		for distro, hosts := range hostsSpawned {
-			taskQueueInfo := schedulerEvents[distro]
-			taskQueueInfo.NumHostsRunning += len(hosts)
-			schedulerEvents[distro] = taskQueueInfo
+	grip.Info(message.Fields{
+		"message":     "hosts spawned",
+		"num_distros": len(hostsSpawned),
+		"runner":      RunnerName,
+		"allocations": newHostsNeeded,
+	})
 
-			hostList := make([]string, len(hosts))
-			for idx, host := range hosts {
-				hostList[idx] = host.Id
-			}
+	for distro, hosts := range hostsSpawned {
+		taskQueueInfo := schedulerEvents[distro]
+		taskQueueInfo.NumHostsRunning += len(hosts)
+		schedulerEvents[distro] = taskQueueInfo
 
-			if ctx.Err() != nil {
-				return errors.New("scheduling run canceled")
-			}
-
-			makespan := taskQueueInfo.ExpectedDuration / time.Duration(len(hostsByDistro)+len(hostsSpawned))
-			grip.Info(message.Fields{
-				"runner":             RunnerName,
-				"distro":             distro,
-				"new_hosts":          hostList,
-				"queue":              taskQueueInfo,
-				"total_runtime":      taskQueueInfo.ExpectedDuration.String(),
-				"predicted_makespan": makespan.String(),
-			})
+		hostList := make([]string, len(hosts))
+		for idx, host := range hosts {
+			hostList[idx] = host.Id
 		}
-	} else {
-		grip.Info("no new hosts spawned")
+
+		if ctx.Err() != nil {
+			return errors.New("scheduling run canceled")
+		}
+
+		makespan := taskQueueInfo.ExpectedDuration / time.Duration(len(hostsByDistro)+len(hostsSpawned))
+		grip.Info(message.Fields{
+			"runner":             RunnerName,
+			"distro":             distro,
+			"new_hosts":          hostList,
+			"num":                len(hostList),
+			"queue":              taskQueueInfo,
+			"total_runtime":      taskQueueInfo.ExpectedDuration.String(),
+			"predicted_makespan": makespan.String(),
+			"event":              taskQueueInfo,
+		})
 	}
 
 	for d, t := range schedulerEvents {
@@ -298,18 +330,18 @@ type distroSchedulerResult struct {
 }
 
 func (s *Scheduler) scheduleDistro(distroId string, runnableTasksForDistro []task.Task,
-	taskExpectedDuration model.ProjectTaskDurations) *distroSchedulerResult {
+	taskExpectedDuration model.ProjectTaskDurations) distroSchedulerResult {
 
 	res := distroSchedulerResult{
 		distroId: distroId,
 	}
 	grip.Infof("Prioritizing %d tasks for distro: %s", len(runnableTasksForDistro), distroId)
 
-	prioritizedTasks, err := s.PrioritizeTasks(s.Settings,
+	prioritizedTasks, err := s.PrioritizeTasks(distroId, s.Settings,
 		runnableTasksForDistro)
 	if err != nil {
 		res.err = errors.Wrap(err, "Error prioritizing tasks")
-		return &res
+		return res
 	}
 
 	// persist the queue of tasks
@@ -318,7 +350,7 @@ func (s *Scheduler) scheduleDistro(distroId string, runnableTasksForDistro []tas
 		taskExpectedDuration)
 	if err != nil {
 		res.err = errors.Wrapf(err, "Error processing distro %s saving task queue", distroId)
-		return &res
+		return res
 	}
 
 	// track scheduled time for prioritized tasks
@@ -327,7 +359,7 @@ func (s *Scheduler) scheduleDistro(distroId string, runnableTasksForDistro []tas
 		res.err = errors.Wrapf(err,
 			"Error processing distro %s setting scheduled time for prioritized tasks",
 			distroId)
-		return &res
+		return res
 	}
 	res.taskQueueItem = queuedTasks
 
@@ -341,7 +373,7 @@ func (s *Scheduler) scheduleDistro(distroId string, runnableTasksForDistro []tas
 		NumHostsRunning:  0,
 		ExpectedDuration: totalDuration,
 	}
-	return &res
+	return res
 
 }
 

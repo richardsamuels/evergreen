@@ -1,6 +1,7 @@
 package route
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -12,7 +13,6 @@ import (
 	"github.com/evergreen-ci/evergreen/rest/data"
 	"github.com/evergreen-ci/evergreen/rest/model"
 	"github.com/stretchr/testify/suite"
-	"golang.org/x/net/context"
 )
 
 // VersionSuite enables testing for version related routes.
@@ -115,7 +115,7 @@ func (s *VersionSuite) SetupSuite() {
 // TestFindByVersionId tests the route for finding version by its ID.
 func (s *VersionSuite) TestFindByVersionId() {
 	handler := &versionHandler{versionId: "versionId"}
-	res, err := handler.Execute(nil, s.sc)
+	res, err := handler.Execute(context.TODO(), s.sc)
 	s.NoError(err)
 	s.NotNil(res)
 	s.Equal(1, len(res.Result))
@@ -138,7 +138,7 @@ func (s *VersionSuite) TestFindByVersionId() {
 // TestFindAllBuildsForVersion tests the route for finding all builds for a version.
 func (s *VersionSuite) TestFindAllBuildsForVersion() {
 	handler := &buildsForVersionHandler{versionId: "versionId"}
-	res, err := handler.Execute(nil, s.sc)
+	res, err := handler.Execute(context.TODO(), s.sc)
 	s.NoError(err)
 	s.NotNil(res)
 	s.Equal(2, len(res.Result))
@@ -161,7 +161,7 @@ func (s *VersionSuite) TestAbortVersion() {
 
 	// Check that Execute runs without error and returns
 	// the correct Version.
-	res, err := handler.Execute(nil, s.sc)
+	res, err := handler.Execute(context.TODO(), s.sc)
 	s.NoError(err)
 	s.NotNil(res)
 	s.Equal(1, len(res.Result))

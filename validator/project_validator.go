@@ -2,6 +2,7 @@ package validator
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -74,7 +75,7 @@ func getDistroIds() ([]string, error) {
 	}
 	distroIds := []string{}
 	for _, d := range distros {
-		if !util.SliceContains(distroIds, d.Id) {
+		if !util.StringSliceContains(distroIds, d.Id) {
 			distroIds = append(distroIds, d.Id)
 		}
 	}
@@ -311,6 +312,19 @@ func ensureHasNecessaryProjectFields(project *model.Project) []ValidationError {
 		)
 	}
 
+	if project.BatchTime > math.MaxInt32 {
+		// Error level is warning for backwards compatibility with
+		// existing projects. This value will be capped at MaxInt32
+		// in ProjectRef.GetBatchTime()
+		errs = append(errs,
+			ValidationError{
+				Message: fmt.Sprintf("project '%s' field 'batchtime' should not exceed %d)",
+					project.Identifier, math.MaxInt32),
+				Level: Warning,
+			},
+		)
+	}
+
 	if project.CommandType != "" {
 		if project.CommandType != model.SystemCommandType &&
 			project.CommandType != model.TestCommandType {
@@ -362,7 +376,7 @@ func ensureReferentialIntegrity(project *model.Project, distroIds []string) []Va
 			}
 			buildVariantTasks[task.Name] = true
 			for _, distroId := range task.Distros {
-				if !util.SliceContains(distroIds, distroId) {
+				if !util.StringSliceContains(distroIds, distroId) {
 					errs = append(errs,
 						ValidationError{
 							Message: fmt.Sprintf("task '%v' in buildvariant "+
@@ -378,7 +392,7 @@ func ensureReferentialIntegrity(project *model.Project, distroIds []string) []Va
 			}
 		}
 		for _, distroId := range buildVariant.RunOn {
-			if !util.SliceContains(distroIds, distroId) {
+			if !util.StringSliceContains(distroIds, distroId) {
 				errs = append(errs,
 					ValidationError{
 						Message: fmt.Sprintf("buildvariant '%v' in project "+

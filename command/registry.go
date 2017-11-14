@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/evergreen-ci/evergreen/model"
 	"github.com/mongodb/grip"
@@ -105,7 +106,7 @@ func (r *commandRegistry) getCommandFactory(name string) (CommandFactory, bool) 
 	return factory, ok
 }
 
-func (r *commandRegistry) renderCommands(cmd model.PluginCommandConf,
+func (r *commandRegistry) renderCommands(commandInfo model.PluginCommandConf,
 	funcs map[string]*model.YAMLCommandSet) ([]Command, error) {
 
 	var (
@@ -115,7 +116,7 @@ func (r *commandRegistry) renderCommands(cmd model.PluginCommandConf,
 		err    error
 	)
 
-	if name := cmd.Function; name != "" {
+	if name := commandInfo.Function; name != "" {
 		cmds, ok := funcs[name]
 		if !ok {
 			errs = append(errs, fmt.Sprintf("function '%s' not found in project functions", name))
@@ -129,18 +130,22 @@ func (r *commandRegistry) renderCommands(cmd model.PluginCommandConf,
 
 				// if no command specific type, use the function's command type
 				if c.Type == "" {
-					c.Type = cmd.Type
+					c.Type = commandInfo.Type
 				}
 
 				if c.DisplayName == "" {
 					c.DisplayName = fmt.Sprintf(`'%v' in "%v"`, c.Command, name)
 				}
 
+				if c.TimeoutSecs == 0 {
+					c.TimeoutSecs = commandInfo.TimeoutSecs
+				}
+
 				parsed = append(parsed, c)
 			}
 		}
 	} else {
-		parsed = append(parsed, cmd)
+		parsed = append(parsed, commandInfo)
 	}
 
 	for _, c := range parsed {
@@ -157,6 +162,7 @@ func (r *commandRegistry) renderCommands(cmd model.PluginCommandConf,
 		}
 		cmd.SetType(c.Type)
 		cmd.SetDisplayName(c.DisplayName)
+		cmd.SetIdleTimeout(time.Duration(c.TimeoutSecs) * time.Second)
 
 		out = append(out, cmd)
 	}

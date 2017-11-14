@@ -8,14 +8,16 @@ import (
 // APIDistro is the model to be returned by the API whenever distros are fetched.
 // EVG-1717 will implement the remainder of the distro model.
 type APIDistro struct {
-	Id APIString `json:"_id"`
+	Name             APIString `json:"name"`
+	UserSpawnAllowed bool      `json:"user_spawn_allowed"`
 }
 
 // BuildFromService converts from service level structs to an APIDistro.
 func (apiDistro *APIDistro) BuildFromService(h interface{}) error {
 	switch v := h.(type) {
 	case distro.Distro:
-		apiDistro.Id = APIString(v.Id)
+		apiDistro.Name = APIString(v.Id)
+		apiDistro.UserSpawnAllowed = v.SpawnAllowed
 	default:
 		return errors.Errorf("incorrect type when fetching converting distro type")
 	}

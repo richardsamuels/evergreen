@@ -1,6 +1,7 @@
 package command
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 
@@ -10,7 +11,6 @@ import (
 	"github.com/mitchellh/mapstructure"
 	"github.com/mongodb/grip"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 // xunitResults reads in an xml file of xunit
@@ -111,17 +111,21 @@ func (c *xunitResults) parseAndUploadResults(ctx context.Context, conf *model.Ta
 		return err
 	}
 
+	var (
+		file       *os.File
+		testSuites []testSuite
+	)
 	for _, reportFileLoc := range reportFilePaths {
 		if ctx.Err() != nil {
 			return errors.New("operation canceled")
 		}
 
-		file, err := os.Open(reportFileLoc)
+		file, err = os.Open(reportFileLoc)
 		if err != nil {
 			return errors.Wrap(err, "couldn't open xunit file")
 		}
 
-		testSuites, err := parseXMLResults(file)
+		testSuites, err = parseXMLResults(file)
 		if err != nil {
 			return errors.Wrap(err, "error parsing xunit file")
 		}
@@ -136,6 +140,12 @@ func (c *xunitResults) parseAndUploadResults(ctx context.Context, conf *model.Ta
 				// logs are only created when a test case does not succeed
 				test, log := tc.toModelTestResultAndLog(conf.Task)
 				if log != nil {
+					if suite.SysOut != "" {
+						log.Lines = append(log.Lines, "system-out:", suite.SysOut)
+					}
+					if suite.SysErr != "" {
+						log.Lines = append(log.Lines, "system-err:", suite.SysErr)
+					}
 					logs = append(logs, log)
 					logIdxToTestIdx = append(logIdxToTestIdx, len(tests))
 				}

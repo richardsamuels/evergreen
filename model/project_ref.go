@@ -2,9 +2,10 @@ package model
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/evergreen-ci/evergreen/db"
-	"github.com/evergreen-ci/evergreen/db/bsonutil"
+	"github.com/mongodb/anser/bsonutil"
 	"github.com/pkg/errors"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
@@ -112,6 +113,20 @@ func FindOneProjectRef(identifier string) (*ProjectRef, error) {
 	if err == mgo.ErrNotFound {
 		return nil, nil
 	}
+	return projectRef, err
+}
+
+func FindFirstProjectRef() (*ProjectRef, error) {
+	projectRef := &ProjectRef{}
+	err := db.FindOne(
+		ProjectRefCollection,
+		bson.M{
+			ProjectRefPrivateKey: false,
+		},
+		db.NoProjection,
+		[]string{"-" + ProjectRefDisplayNameKey},
+		projectRef,
+	)
 	return projectRef, err
 }
 
@@ -230,10 +245,19 @@ func (projectRef *ProjectRef) String() string {
 
 // GetBatchTime returns the Batch Time of the ProjectRef
 func (p *ProjectRef) GetBatchTime(variant *BuildVariant) int {
+	var val int = p.BatchTime
 	if variant.BatchTime != nil {
-		return *variant.BatchTime
+		val = *variant.BatchTime
 	}
-	return p.BatchTime
+
+	// BatchTime is in minutes, but it is stored/used internally as
+	// nanoseconds. We need to cap this value to Int32 to prevent an
+	// overflow/wrap around to negative values of time.Duration
+	if val > math.MaxInt32 {
+		return math.MaxInt32
+	} else {
+		return val
+	}
 }
 
 // Location generates and returns the ssh hostname and path to the repo.

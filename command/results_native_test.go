@@ -1,6 +1,7 @@
 package command
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,11 +14,10 @@ import (
 	"github.com/evergreen-ci/evergreen/testutil"
 	"github.com/evergreen-ci/evergreen/util"
 	. "github.com/smartystreets/goconvey/convey"
-	"golang.org/x/net/context"
 )
 
 func resetTasks(t *testing.T) {
-	db.SetGlobalSessionProvider(db.SessionFactoryFromConfig(testutil.TestConfig()))
+	db.SetGlobalSessionProvider(testutil.TestConfig().SessionFactory())
 	testutil.HandleTestingErr(
 		db.ClearCollections(task.Collection, model.TestLogCollection), t,
 		"error clearing test collections")

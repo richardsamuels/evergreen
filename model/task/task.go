@@ -10,13 +10,14 @@ import (
 	"github.com/evergreen-ci/evergreen/model/event"
 	"github.com/evergreen-ci/evergreen/model/testresult"
 	"github.com/evergreen-ci/evergreen/util"
+	"github.com/mongodb/grip"
 	"github.com/pkg/errors"
 	"gopkg.in/mgo.v2/bson"
 )
 
 const (
-	newresultsAllExecutionsField     = "newresults_all_executions"
-	newresultsCurrentExecutionsField = "newresults_current_execution"
+	edgesKey = "edges"
+	taskKey  = "task"
 )
 
 var (
@@ -141,7 +142,7 @@ func (d *Dependency) SetBSON(raw bson.Raw) error {
 	}
 
 	// hack to support the legacy depends_on, since we can't just unmarshal a string
-	strBytes, _ := bson.Marshal(bson.RawD{{"str", raw}})
+	strBytes, _ := bson.Marshal(bson.RawD{{Name: "str", Value: raw}})
 	var strStruct struct {
 		String string `bson:"str"`
 	}
@@ -260,6 +261,41 @@ func (t *Task) DependenciesMet(depCaches map[string]Task) (bool, error) {
 	return true, nil
 }
 
+// AllDependenciesSatisfied inspects the tasks first-order
+// dependencies with regards to the cached tasks, and reports if all
+// of the dependencies have been satisfied.
+//
+// If the cached tasks do not include a dependency specified by one of
+// the tasks, the function returns an error.
+func (t *Task) AllDependenciesSatisfied(cache map[string]Task) (bool, error) {
+	if len(t.DependsOn) == 0 {
+		return true, nil
+	}
+
+	catcher := grip.NewBasicCatcher()
+	deps := []Task{}
+	for _, dep := range t.DependsOn {
+		if cachedDep, ok := cache[dep.TaskId]; !ok {
+			catcher.Add(errors.Errorf("cannot resolve task %s", dep.TaskId))
+			continue
+		} else {
+			deps = append(deps, cachedDep)
+		}
+	}
+
+	if catcher.HasErrors() {
+		return false, catcher.Resolve()
+	}
+
+	for _, depTask := range deps {
+		if !t.satisfiesDependency(&depTask) {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
 // HasFailedTests iterates through a tasks' tests and returns true if
 // that task had any failed tests.
 func (t *Task) HasFailedTests() bool {
@@ -307,7 +343,7 @@ func (t *Task) PreviousCompletedTask(project string,
 	if len(statuses) == 0 {
 		statuses = CompletedStatuses
 	}
-	return FindOne(ByBeforeRevisionWithStatuses(t.RevisionOrderNumber, statuses, t.BuildVariant,
+	return FindOneNoMerge(ByBeforeRevisionWithStatuses(t.RevisionOrderNumber, statuses, t.BuildVariant,
 		t.DisplayName, project))
 }
 
@@ -531,7 +567,6 @@ func (t *Task) Reset() error {
 	t.StartTime = util.ZeroTime
 	t.ScheduledTime = util.ZeroTime
 	t.FinishTime = util.ZeroTime
-	t.TestResults = []TestResult{}
 	reset := bson.M{
 		"$set": bson.M{
 			ActivatedKey:     true,
@@ -581,8 +616,8 @@ func ResetTasks(taskIds []string) error {
 		},
 		reset,
 	)
-	return err
 
+	return err
 }
 
 // UpdateHeartbeat updates the heartbeat to be the current time
@@ -672,17 +707,27 @@ func (t *Task) MarkStart(startTime time.Time) error {
 
 // SetResults sets the results of the task in TestResults
 func (t *Task) SetResults(results []TestResult) error {
-	t.TestResults = results
-	return UpdateOne(
-		bson.M{
-			IdKey: t.Id,
-		},
-		bson.M{
-			"$set": bson.M{
-				TestResultsKey: results,
-			},
-		},
-	)
+	catcher := grip.NewSimpleCatcher()
+	var testResult testresult.TestResult
+	for _, result := range results {
+		testResult = result.convertToNewStyleTestResult()
+		catcher.Add(testResult.InsertByTaskIDAndExecution(t.Id, t.Execution))
+	}
+	return errors.Wrap(catcher.Resolve(), "error inserting into testresults collection")
+}
+
+func (t TestResult) convertToNewStyleTestResult() testresult.TestResult {
+	return testresult.TestResult{
+		Status:    t.Status,
+		TestFile:  t.TestFile,
+		URL:       t.URL,
+		URLRaw:    t.URLRaw,
+		LogID:     t.LogId,
+		LineNum:   t.LineNum,
+		ExitCode:  t.ExitCode,
+		StartTime: t.StartTime,
+		EndTime:   t.EndTime,
+	}
 }
 
 // MarkUnscheduled marks the task as undispatched and updates it in the database
@@ -699,21 +744,6 @@ func (t *Task) MarkUnscheduled() error {
 		},
 	)
 
-}
-
-// ClearResults sets the TestResults to an empty list
-func (t *Task) ClearResults() error {
-	t.TestResults = []TestResult{}
-	return UpdateOne(
-		bson.M{
-			IdKey: t.Id,
-		},
-		bson.M{
-			"$set": bson.M{
-				TestResultsKey: []TestResult{},
-			},
-		},
-	)
 }
 
 // SetCost updates the task's Cost field
@@ -917,79 +947,132 @@ func ExpectedTaskDuration(project, buildvariant string, window time.Duration) (m
 	return expDurations, nil
 }
 
-func mergeNewTestResultsPipeline(id string, archived bool) []bson.M {
-	lookupLocalField := IdKey
-	if archived {
-		lookupLocalField = OldTaskIdKey
-	}
-
-	// aggregation stages
-	matchStage := bson.M{"$match": bson.M{IdKey: id}}
-	lookupStage := bson.M{"$lookup": bson.M{
-		"from":         testresult.Collection,
-		"localField":   lookupLocalField,
-		"foreignField": testresult.TaskIDKey,
-		"as":           newresultsAllExecutionsField,
-	}}
-	addNewResultsStage := bson.M{"$addFields": bson.M{
-		newresultsCurrentExecutionsField: bson.M{
-			"$filter": bson.M{
-				"input": "$" + newresultsAllExecutionsField,
-				"as":    "testresult",
-				"cond": bson.M{
-					"$eq": []string{
-						"$$" + "testresult" + "." + testresult.ExecutionKey,
-						"$" + ExecutionKey,
-					},
-				},
-			},
-		},
-	}}
-	deleteNewTestResultFieldsStage := bson.M{"$project": bson.M{
-		newresultsCurrentExecutionsField + "." + IdKey:                   0,
-		newresultsCurrentExecutionsField + "." + testresult.TaskIDKey:    0,
-		newresultsCurrentExecutionsField + "." + testresult.ExecutionKey: 0,
-	}}
-	concatStage := bson.M{"$addFields": bson.M{
-		TestResultsKey: bson.M{
-			"$setUnion": []string{
-				"$" + TestResultsKey,
-				"$" + newresultsCurrentExecutionsField,
-			},
-		},
-	}}
-	cleanupStage := bson.M{"$project": bson.M{
-		newresultsAllExecutionsField:     0,
-		newresultsCurrentExecutionsField: 0,
-	}}
-
-	return []bson.M{
-		matchStage,
-		lookupStage,
-		addNewResultsStage,
-		deleteNewTestResultFieldsStage,
-		concatStage,
-		cleanupStage,
-	}
-}
-
 // MergeNewTestResults returns the task with both old (embedded in
 // the tasks collection) and new (from the testresults collection) test results
 // merged in the Task's TestResults field.
 func (t *Task) MergeNewTestResults() error {
-	collection := Collection
+	id := t.Id
 	if t.Archived {
-		collection = OldCollection
+		id = t.OldTaskId
 	}
-
-	pipeline := mergeNewTestResultsPipeline(t.Id, t.Archived)
-
-	tasks := []Task{}
-	if err := db.Aggregate(collection, pipeline, &tasks); err != nil {
-		return errors.Wrap(err, "problem merging new test results")
+	newTestResults, err := testresult.FindByTaskIDAndExecution(id, t.Execution)
+	if err != nil {
+		return errors.Wrap(err, "problem finding test results")
 	}
-	if len(tasks) == 1 {
-		*t = tasks[0]
+	for _, result := range newTestResults {
+		t.TestResults = append(t.TestResults, TestResult{
+			Status:    result.Status,
+			TestFile:  result.TestFile,
+			URL:       result.URL,
+			URLRaw:    result.URLRaw,
+			LogId:     result.LogID,
+			LineNum:   result.LineNum,
+			ExitCode:  result.ExitCode,
+			StartTime: result.StartTime,
+			EndTime:   result.EndTime,
+		})
 	}
 	return nil
+}
+
+func FindRunnable() ([]Task, error) {
+	expectedStatuses := []string{evergreen.TaskSucceeded, evergreen.TaskFailed, ""}
+
+	matchActivatedUndispatchedTasks := bson.M{
+		"$match": bson.M{
+			ActivatedKey: true,
+			StatusKey:    evergreen.TaskUndispatched,
+			//Filter out blacklisted tasks
+			PriorityKey: bson.M{"$gte": 0},
+		},
+	}
+
+	graphLookupTaskDeps := bson.M{
+		"$graphLookup": bson.M{
+			"from":             Collection,
+			"startWith":        "$" + DependsOnKey + "." + IdKey,
+			"connectFromField": DependsOnKey + "." + IdKey,
+			"connectToField":   IdKey,
+			"as":               edgesKey,
+			// restrict graphLookup to only direct dependencies
+			"maxDepth": 0,
+			"restrictSearchWithMatch": bson.M{
+				StatusKey: bson.M{
+					"$in": expectedStatuses,
+				},
+			},
+		},
+	}
+
+	reshapeTasksAndEdges := bson.M{
+		"$project": bson.M{
+			edgesKey + "." + IdKey:     1,
+			edgesKey + "." + StatusKey: 1,
+			taskKey:                    "$$ROOT",
+		},
+	}
+
+	removeEdgesFromTask := bson.M{
+		"$project": bson.M{
+			taskKey + "." + edgesKey: 0,
+		},
+	}
+
+	redactUnrunnableTasks := bson.M{
+		"$redact": bson.M{
+			"$cond": bson.M{
+				"if": bson.M{
+					"$setEquals": []string{"$" + taskKey + "." + DependsOnKey, "$" + edgesKey},
+				},
+				"then": "$$KEEP",
+				"else": "$$PRUNE",
+			},
+		},
+	}
+
+	replaceRoot := bson.M{
+		"$replaceRoot": bson.M{
+			"newRoot": "$" + taskKey,
+		},
+	}
+
+	joinProjectRef := bson.M{
+		"$lookup": bson.M{
+			"from":         "project_ref",
+			"localField":   ProjectKey,
+			"foreignField": "identifier",
+			"as":           "project_ref",
+		},
+	}
+
+	filterDisabledProejcts := bson.M{
+		"$match": bson.M{
+			"project_ref.0." + "enabled": true,
+		},
+	}
+
+	removeProjectRef := bson.M{
+		"$project": bson.M{
+			"project_ref": 0,
+		},
+	}
+
+	pipeline := []bson.M{
+		matchActivatedUndispatchedTasks,
+		graphLookupTaskDeps,
+		reshapeTasksAndEdges,
+		removeEdgesFromTask,
+		redactUnrunnableTasks,
+		replaceRoot,
+		joinProjectRef,
+		filterDisabledProejcts,
+		removeProjectRef,
+	}
+
+	runnableTasks := []Task{}
+	if err := Aggregate(pipeline, &runnableTasks); err != nil {
+		return nil, errors.Wrap(err, "failed to fetch runnable tasks")
+	}
+
+	return runnableTasks, nil
 }

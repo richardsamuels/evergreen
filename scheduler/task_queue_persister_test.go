@@ -7,15 +7,8 @@ import (
 	"github.com/evergreen-ci/evergreen/db"
 	"github.com/evergreen-ci/evergreen/model"
 	"github.com/evergreen-ci/evergreen/model/task"
-	"github.com/evergreen-ci/evergreen/testutil"
 	. "github.com/smartystreets/goconvey/convey"
 )
-
-var taskQueuePersisterTestConf = testutil.TestConfig()
-
-func init() {
-	db.SetGlobalSessionProvider(db.SessionFactoryFromConfig(taskQueuePersisterTestConf))
-}
 
 func TestDBTaskQueuePersister(t *testing.T) {
 
@@ -98,7 +91,7 @@ func TestDBTaskQueuePersister(t *testing.T) {
 		}
 
 		durationMappings := model.ProjectTaskDurations{
-			map[string]*model.BuildVariantTaskDurations{
+			TaskDurationByProject: map[string]*model.BuildVariantTaskDurations{
 				projects[0]: {
 					map[string]*model.TaskDurations{
 						buildVariants[0]: {

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -127,34 +128,34 @@ func (uis *UIServer) taskPage(w http.ResponseWriter, r *http.Request) {
 
 	executionStr := mux.Vars(r)["execution"]
 	archived := false
+
+	// if there is an execution number, the task might be in the old_tasks collection, so we
+	// query that collection and set projCtx.Task to the old task if it exists.
 	if executionStr != "" {
-		// otherwise we can look in either tasks or old_tasks
-		// where tasks are looked up in the old_tasks collection with key made up of
-		// the original key and the execution number joined by an "_"
-		// and the tasks are looked up in the tasks collection by key and execution
-		// number, so that we avoid finding the wrong execution in the tasks
-		// collection
 		execution, err := strconv.Atoi(executionStr)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Bad execution number: %v", executionStr), http.StatusBadRequest)
 			return
 		}
+		// Construct the old task id.
 		oldTaskId := fmt.Sprintf("%v_%v", projCtx.Task.Id, executionStr)
+
+		// Try to find the task in the old_tasks collection.
 		taskFromDb, err := task.FindOneOld(task.ById(oldTaskId))
 		if err != nil {
 			uis.LoggedError(w, r, http.StatusInternalServerError, err)
 			return
 		}
-		archived = true
 
-		if taskFromDb == nil {
-			if execution != projCtx.Task.Execution {
-				uis.LoggedError(w, r, http.StatusInternalServerError, errors.Wrap(err, "Error finding old task"))
-				return
-			}
-			archived = false
-		} else {
+		// If we found a task, set the task context. Otherwise, if taskFromDb is nil, check
+		// that the execution matches the context's execution. If it does not, return an
+		// error, since that means we are searching for a task that does not exist.
+		if taskFromDb != nil {
 			projCtx.Task = taskFromDb
+			archived = true
+		} else if execution != projCtx.Task.Execution {
+			uis.LoggedError(w, r, http.StatusInternalServerError, errors.Wrap(err, "Error finding old task"))
+			return
 		}
 	}
 
@@ -548,6 +549,11 @@ func (uis *UIServer) taskLogRaw(w http.ResponseWriter, r *http.Request) {
 // avoids type-checking json params for the below function
 func (uis *UIServer) taskModify(w http.ResponseWriter, r *http.Request) {
 	projCtx := MustHaveProjectContext(r)
+	project, err := projCtx.GetProject()
+	if err != nil || project == nil {
+		http.Error(w, "Not Found", http.StatusNotFound)
+		return
+	}
 
 	if projCtx.Task == nil {
 		http.Error(w, "Not Found", http.StatusNotFound)
@@ -583,7 +589,7 @@ func (uis *UIServer) taskModify(w http.ResponseWriter, r *http.Request) {
 	// determine what action needs to be taken
 	switch putParams.Action {
 	case "restart":
-		if err = model.TryResetTask(projCtx.Task.Id, authName, evergreen.UIPackage, projCtx.Project, nil); err != nil {
+		if err = model.TryResetTask(projCtx.Task.Id, authName, evergreen.UIPackage, project, nil); err != nil {
 			http.Error(w, fmt.Sprintf("Error restarting task %v: %v", projCtx.Task.Id, err), http.StatusInternalServerError)
 			return
 		}
@@ -657,8 +663,11 @@ func (uis *UIServer) taskModify(w http.ResponseWriter, r *http.Request) {
 
 func (uis *UIServer) testLog(w http.ResponseWriter, r *http.Request) {
 	logId := mux.Vars(r)["log_id"]
-	var testLog *model.TestLog
-	var err error
+	var (
+		testLog  *model.TestLog
+		err      error
+		taskExec int
+	)
 
 	if logId != "" { // direct link to a log document by its ID
 		testLog, err = model.FindOneTestLogById(logId)
@@ -670,7 +679,7 @@ func (uis *UIServer) testLog(w http.ResponseWriter, r *http.Request) {
 		taskID := mux.Vars(r)["task_id"]
 		testName := mux.Vars(r)["test_name"]
 		taskExecutionsAsString := mux.Vars(r)["task_execution"]
-		taskExec, err := strconv.Atoi(taskExecutionsAsString)
+		taskExec, err = strconv.Atoi(taskExecutionsAsString)
 		if err != nil {
 			http.Error(w, "task execution num must be an int", http.StatusBadRequest)
 			return
@@ -688,9 +697,16 @@ func (uis *UIServer) testLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
 	displayLogs := make(chan apimodels.LogMessage)
 	go func() {
+		defer close(displayLogs)
 		for _, line := range testLog.Lines {
+			if ctx.Err() != nil {
+				return
+			}
 			displayLogs <- apimodels.LogMessage{
 				Type:     apimodels.TaskLogPrefix,
 				Severity: apimodels.LogInfoPrefix,
@@ -698,18 +714,20 @@ func (uis *UIServer) testLog(w http.ResponseWriter, r *http.Request) {
 				Message:  line,
 			}
 		}
-		close(displayLogs)
 	}()
 
 	template := "task_log.html"
+	data := struct {
+		Data chan apimodels.LogMessage
+		User *user.DBUser
+	}{displayLogs, GetUser(r)}
 
 	if (r.FormValue("raw") == "1") || (r.Header.Get("Content-type") == "text/plain") {
 		template = "task_log_raw.html"
-		w.Header().Set("Content-Type", "text/plain")
+		if err = uis.StreamText(w, http.StatusOK, data, "base", template); err != nil {
+			grip.Error(errors.Wrapf(err, "error streaming log data for log %s", logId))
+		}
+	} else {
+		uis.WriteHTML(w, http.StatusOK, data, "base", template)
 	}
-
-	uis.WriteHTML(w, http.StatusOK, struct {
-		Data chan apimodels.LogMessage
-		User *user.DBUser
-	}{displayLogs, GetUser(r)}, "base", template)
 }

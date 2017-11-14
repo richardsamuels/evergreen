@@ -8,6 +8,7 @@ import (
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/db"
 	"github.com/evergreen-ci/evergreen/model/distro"
+	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/evergreen-ci/evergreen/testutil"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/assert"
@@ -15,7 +16,7 @@ import (
 )
 
 func init() {
-	db.SetGlobalSessionProvider(db.SessionFactoryFromConfig(testutil.TestConfig()))
+	db.SetGlobalSessionProvider(testutil.TestConfig().SessionFactory())
 }
 
 func hostIdInSlice(hosts []Host, id string) bool {
@@ -419,7 +420,7 @@ func TestHostSetExpirationTime(t *testing.T) {
 
 func TestFindRunningSpawnedHosts(t *testing.T) {
 	testConfig := testutil.TestConfig()
-	db.SetGlobalSessionProvider(db.SessionFactoryFromConfig(testConfig))
+	db.SetGlobalSessionProvider(testConfig.SessionFactory())
 
 	testutil.HandleTestingErr(db.Clear(Collection), t, "Error"+
 		" clearing '%v' collection", Collection)
@@ -708,7 +709,7 @@ func TestDecommissionHostsWithDistroId(t *testing.T) {
 	})
 }
 
-func TestFindByLCT(t *testing.T) {
+func TestFindNeedsNewAgent(t *testing.T) {
 	Convey("with the a given time for checking and an empty hosts collection", t, func() {
 		testutil.HandleTestingErr(db.Clear(Collection), t, "Error"+
 			" clearing '%v' collection", Collection)
@@ -720,7 +721,7 @@ func TestFindByLCT(t *testing.T) {
 				StartedBy: evergreen.User,
 			}
 			So(h.Insert(), ShouldBeNil)
-			hosts, err := Find(ByRunningWithTimedOutLCT(time.Now()))
+			hosts, err := Find(NeedsNewAgent(time.Now()))
 			So(err, ShouldBeNil)
 			So(len(hosts), ShouldEqual, 1)
 			So(hosts[0].Id, ShouldEqual, "id")
@@ -733,7 +734,7 @@ func TestFindByLCT(t *testing.T) {
 				foundHost, err := FindOne(ById(h.Id))
 				So(err, ShouldBeNil)
 				So(foundHost, ShouldNotBeNil)
-				hosts, err := Find(ByRunningWithTimedOutLCT(time.Now()))
+				hosts, err := Find(NeedsNewAgent(time.Now()))
 				So(err, ShouldBeNil)
 				So(len(hosts), ShouldEqual, 1)
 				So(hosts[0].Id, ShouldEqual, h.Id)
@@ -748,7 +749,7 @@ func TestFindByLCT(t *testing.T) {
 				StartedBy:             evergreen.User,
 			}
 			So(anotherHost.Insert(), ShouldBeNil)
-			hosts, err := Find(ByRunningWithTimedOutLCT(now))
+			hosts, err := Find(NeedsNewAgent(now))
 			So(err, ShouldBeNil)
 			So(len(hosts), ShouldEqual, 1)
 			So(hosts[0].Id, ShouldEqual, anotherHost.Id)
@@ -762,13 +763,13 @@ func TestFindByLCT(t *testing.T) {
 				StartedBy:             evergreen.User,
 			}
 			So(anotherHost.Insert(), ShouldBeNil)
-			hosts, err := Find(ByRunningWithTimedOutLCT(now))
+			hosts, err := Find(NeedsNewAgent(now))
 			So(err, ShouldBeNil)
 			So(len(hosts), ShouldEqual, 0)
 			Convey("after resetting the LCT", func() {
 				So(anotherHost.ResetLastCommunicated(), ShouldBeNil)
 				So(anotherHost.LastCommunicationTime, ShouldResemble, time.Unix(0, 0))
-				h, err := Find(ByRunningWithTimedOutLCT(now))
+				h, err := Find(NeedsNewAgent(now))
 				So(err, ShouldBeNil)
 				So(len(h), ShouldEqual, 1)
 				So(h[0].Id, ShouldEqual, "testhost")
@@ -781,7 +782,7 @@ func TestFindByLCT(t *testing.T) {
 				StartedBy: evergreen.User,
 			}
 			So(h.Insert(), ShouldBeNil)
-			hosts, err := Find(ByRunningWithTimedOutLCT(now))
+			hosts, err := Find(NeedsNewAgent(now))
 			So(err, ShouldBeNil)
 			So(len(hosts), ShouldEqual, 0)
 		})
@@ -792,17 +793,57 @@ func TestFindByLCT(t *testing.T) {
 				StartedBy: "anotherUser",
 			}
 			So(h.Insert(), ShouldBeNil)
-			hosts, err := Find(ByRunningWithTimedOutLCT(now))
+			hosts, err := Find(NeedsNewAgent(now))
 			So(err, ShouldBeNil)
 			So(len(hosts), ShouldEqual, 0)
-
 		})
-
+		Convey("with a host marked as needing a new agent", func() {
+			h := Host{
+				Id:            "h",
+				Status:        evergreen.HostRunning,
+				StartedBy:     evergreen.User,
+				NeedsNewAgent: true,
+			}
+			So(h.Insert(), ShouldBeNil)
+			hosts, err := Find(NeedsNewAgent(now))
+			So(err, ShouldBeNil)
+			So(len(hosts), ShouldEqual, 1)
+			So(hosts[0].Id, ShouldEqual, "h")
+		})
 	})
 }
 
-func TestHostUpsert(t *testing.T) {
+func TestHostElapsedCommTime(t *testing.T) {
 	assert := assert.New(t)
+	now := time.Now()
+	hostThatRanTask := Host{
+		Id:                    "hostThatRanTask",
+		CreationTime:          now.Add(-30 * time.Minute),
+		StartTime:             now.Add(-20 * time.Minute),
+		LastCommunicationTime: now.Add(-10 * time.Minute),
+	}
+	hostThatJustStarted := Host{
+		Id:           "hostThatJustStarted",
+		CreationTime: now.Add(-5 * time.Minute),
+		StartTime:    now.Add(-1 * time.Minute),
+	}
+	hostWithNoCreateTime := Host{
+		Id: "hostWithNoCreateTime",
+		LastCommunicationTime: now.Add(-15 * time.Minute),
+	}
+	hostWithOnlyCreateTime := Host{
+		Id:           "hostWithOnlyCreateTime",
+		CreationTime: now.Add(-7 * time.Minute),
+	}
+
+	assert.InDelta(int64(10*time.Minute), int64(hostThatRanTask.GetElapsedCommunicationTime()), float64(1*time.Millisecond))
+	assert.InDelta(int64(1*time.Minute), int64(hostThatJustStarted.GetElapsedCommunicationTime()), float64(1*time.Millisecond))
+	assert.InDelta(int64(15*time.Minute), int64(hostWithNoCreateTime.GetElapsedCommunicationTime()), float64(1*time.Millisecond))
+	assert.InDelta(int64(7*time.Minute), int64(hostWithOnlyCreateTime.GetElapsedCommunicationTime()), float64(1*time.Millisecond))
+}
+
+func TestHostUpsert(t *testing.T) {
+	assert := assert.New(t) // nolint
 	const hostID = "upsertTest"
 	testHost := &Host{
 		Id:             hostID,
@@ -851,10 +892,11 @@ func TestHostUpsert(t *testing.T) {
 }
 
 func TestHostStats(t *testing.T) {
+	assert := assert.New(t) // nolint
+
 	const d1 = "distro1"
 	const d2 = "distro2"
 
-	assert := assert.New(t)
 	testutil.HandleTestingErr(db.Clear(Collection), t, "error clearing hosts collection")
 	host1 := &Host{
 		Id:          "host1",
@@ -908,8 +950,8 @@ func TestHostStats(t *testing.T) {
 	assert.NoError(host7.Insert())
 	assert.NoError(host8.Insert())
 
-	// test GetHostStatsByDistro
-	stats, err := GetHostStatsByDistro()
+	// test GetStatsByDistro
+	stats, err := GetStatsByDistro()
 	assert.NoError(err)
 	for _, entry := range stats {
 		if entry.Distro == d1 {
@@ -930,4 +972,55 @@ func TestHostStats(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestHostFindingWithTask(t *testing.T) {
+	testutil.HandleTestingErr(db.ClearCollections(Collection, task.Collection), t, "error clearing collections")
+	assert := assert.New(t) // nolint
+	task1 := task.Task{
+		Id: "task1",
+	}
+	task2 := task.Task{
+		Id: "task2",
+	}
+	task3 := task.Task{
+		Id: "task3",
+	}
+	host1 := Host{
+		Id:          "host1",
+		RunningTask: task1.Id,
+		Status:      evergreen.HostRunning,
+	}
+	host2 := Host{
+		Id:          "host2",
+		RunningTask: task2.Id,
+		Status:      evergreen.HostRunning,
+	}
+	host3 := Host{
+		Id:          "host3",
+		RunningTask: "",
+		Status:      evergreen.HostRunning,
+	}
+	host4 := Host{
+		Id:     "host4",
+		Status: evergreen.HostTerminated,
+	}
+	assert.NoError(task1.Insert())
+	assert.NoError(task2.Insert())
+	assert.NoError(task3.Insert())
+	assert.NoError(host1.Insert())
+	assert.NoError(host2.Insert())
+	assert.NoError(host3.Insert())
+	assert.NoError(host4.Insert())
+
+	var hosts []Host
+	err := db.Aggregate(Collection, QueryWithFullTaskPipeline(
+		bson.M{StatusKey: bson.M{"$ne": evergreen.HostTerminated}}),
+		&hosts)
+	assert.NoError(err)
+
+	assert.Equal(3, len(hosts))
+	assert.Equal(task1.Id, hosts[0].RunningTaskFull.Id)
+	assert.Equal(task2.Id, hosts[1].RunningTaskFull.Id)
+	assert.Nil(hosts[2].RunningTaskFull)
 }

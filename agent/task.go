@@ -1,17 +1,43 @@
 package agent
 
 import (
+	"context"
+	"fmt"
 	"time"
 
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/command"
 	"github.com/evergreen-ci/evergreen/model"
 	"github.com/mongodb/grip"
+	"github.com/mongodb/grip/message"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 func (a *Agent) startTask(ctx context.Context, tc *taskContext, complete chan<- string) {
+	defer func() {
+		if p := recover(); p != nil {
+			var pmsg string
+			if ps, ok := p.(string); ok {
+				pmsg = ps
+			} else {
+				pmsg = fmt.Sprintf("%+v", p)
+			}
+
+			m := message.Fields{
+				"operation": "running task",
+				"panic":     pmsg,
+				"stack":     message.NewStack(1, "").Raw(),
+			}
+			grip.Alert(m)
+			select {
+			case complete <- evergreen.TaskSystemFailed:
+				grip.Debug("marked task as system-failed after panic")
+			default:
+				grip.Debug("marking task system failed during panic handling, but complete channel was blocked")
+			}
+		}
+	}()
+
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithCancel(ctx)
 	defer cancel()
@@ -22,6 +48,10 @@ func (a *Agent) startTask(ctx context.Context, tc *taskContext, complete chan<- 
 		return
 	}
 
+	if ctx.Err() != nil {
+		grip.Info("task canceled")
+		return
+	}
 	tc.setCurrentCommand(factory())
 	a.comm.UpdateLastMessageTime()
 
@@ -76,13 +106,13 @@ func (a *Agent) startTask(ctx context.Context, tc *taskContext, complete chan<- 
 		tc.logger.Task().Info("task canceled")
 		return
 	}
-	newDir, err := a.createTaskDirectory(tc, taskConfig)
-	tc.taskDirectory = newDir
+	newDir, err := a.createTaskDirectory(tc)
 	if err != nil {
 		tc.logger.Execution().Errorf("error creating task directory: %s", err)
 		complete <- evergreen.TaskFailed
 		return
 	}
+	tc.taskDirectory = newDir
 	taskConfig.Expansions.Put("workdir", newDir)
 
 	// notify API server that the task has been started.
@@ -96,9 +126,9 @@ func (a *Agent) startTask(ctx context.Context, tc *taskContext, complete chan<- 
 	a.killProcs(tc)
 	a.runPreTaskCommands(innerCtx, tc)
 
-	taskStatus := a.runTaskCommands(innerCtx, tc)
-	if taskStatus != nil {
+	if err = a.runTaskCommands(innerCtx, tc); err != nil {
 		complete <- evergreen.TaskFailed
+		return
 	}
 	complete <- evergreen.TaskSucceeded
 }
@@ -143,7 +173,10 @@ func (tc *taskContext) getCurrentTimeout() time.Duration {
 	tc.RLock()
 	defer tc.RUnlock()
 
-	return tc.timeout
+	if tc.timeout > 0 {
+		return tc.timeout
+	}
+	return defaultIdleTimeout
 }
 
 func (tc *taskContext) reachTimeOut() {
@@ -200,7 +233,6 @@ func (a *Agent) getTaskConfig(ctx context.Context, tc *taskContext) (*model.Task
 }
 
 func (a *Agent) getExecTimeoutSecs(taskConfig *model.TaskConfig) time.Duration {
-
 	pt := taskConfig.Project.FindProjectTask(taskConfig.Task.DisplayName)
 	if pt.ExecTimeoutSecs == 0 {
 		// if unspecified in the project task and the project, use the default value

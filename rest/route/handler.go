@@ -1,6 +1,7 @@
 package route
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/evergreen-ci/evergreen/rest"
@@ -10,7 +11,6 @@ import (
 	"github.com/mongodb/grip"
 	"github.com/mongodb/grip/message"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 // MethodHandler contains all of the methods necessary for completely processing
@@ -101,15 +101,12 @@ func makeHandler(methodHandler MethodHandler, sc data.Connector) http.HandlerFun
 				handleAPIError(err, w, r)
 				return
 			}
-			util.WriteJSON(&w, result.Result, http.StatusOK)
+			util.WriteJSON(w, http.StatusOK, result.Result)
 		default:
-			if len(result.Result) < 1 {
-				http.Error(w, "{}", http.StatusInternalServerError)
-				return
-			} else if len(result.Result) > 1 {
-				util.WriteJSON(&w, result.Result, http.StatusOK)
+			if len(result.Result) == 1 {
+				util.WriteJSON(w, http.StatusOK, result.Result[0])
 			} else {
-				util.WriteJSON(&w, result.Result[0], http.StatusOK)
+				util.WriteJSON(w, http.StatusOK, result.Result)
 			}
 		}
 	}
@@ -140,5 +137,5 @@ func handleAPIError(e error, w http.ResponseWriter, r *http.Request) {
 		"error":  e.Error(),
 	})
 
-	util.WriteJSON(&w, apiErr, apiErr.StatusCode)
+	util.WriteJSON(w, apiErr.StatusCode, apiErr)
 }

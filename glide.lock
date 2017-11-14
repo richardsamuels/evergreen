@@ -9,8 +9,6 @@ imports:
     version: 1358eff22f0dd0c54fc521042cc607f6ff4b531a
     subpackages:
       - context
-  - name: github.com/pkg/sftp
-    version: 506297c9013d2893d5c5daaa9155e7333a1c58de
   - name: github.com/vaughan0/go-ini
     version: a98ad7ee00ec53921f08832bc06ecf7fd600e6a1
   - name: github.com/10gen/goamz # github.com/goamz/goamz
@@ -19,10 +17,6 @@ imports:
       - s3
       - aws
       - ec2
-  - name: github.com/10gen-labs/slogger
-    version: c972902347f8b08b39dac87b43955d01caedb63a
-    subpackages:
-      - v1
   - name: github.com/codegangsta/inject
     version: 37d7f8432a3e684eef9b2edece76bdfa6ac85b39
   - name: github.com/docker/docker
@@ -39,6 +33,8 @@ imports:
     version: 1b0c7f6e9ab3d7f500fd7d50c7ad835ff428139b
   - name: github.com/gorilla/sessions
     version: 28f896870851935df0885fca3410114940d49e1b
+  - name: github.com/gorilla/csrf
+    version: 8aae08ff9fb9a8fe293deea3d057f37d89744670
   - name: github.com/mitchellh/mapstructure
     version: 6fb2c832bcac61d01212ab1d172f7a14a8585b07
 
@@ -47,14 +43,8 @@ imports:
   - name: github.com/smartystreets/goconvey
     version: af8e7d560364b90f732a1d119d17b5506e50447d
 
-  - name: github.com/davecgh/go-spew
-    version: adab96458c51a58dc1783b3335dcce5461522e75
-  - name: github.com/stretchr/objx
-    version: 1a9d0bb9f541897e62256577b352fdbc1fb4fd94
   - name: github.com/stretchr/testify
     version: 890a5c3458b43e6104ff5da8dfa139d013d77544
-  - name: github.com/pmezard/go-difflib
-    version: 792786c7400a136282c1664665ae0a8db921c6c2
 
   - name: github.com/jacobsa/oglematchers
     version: 4fc24f97b5b74022c2a3f4ca7eed57ca29083d3e
@@ -119,8 +109,12 @@ imports:
     version: d8f5ea21b9295e315e612b4bcf4bedea93454d4d
 
   - name: github.com/mongodb/grip
-    version: 5a508a7451440cd70927fae2ff4b7a3cd77b0424
+    version: eaf2da9070a52c386a50bbcbce1e22eb98d937aa
   - name: github.com/mongodb/anser
-    version: 123081d6a691aa2ee0f05293e747260b52645990
+    version: f33e6637df2eccf076929f744c619fe33b2a5bd6
   - name: github.com/mongodb/amboy
-    version: 750e174a0f779de45a6c95cffad28609a7647914
+    version: a214bdd82a05166c500b5bc8cb59bbc43d73952b
+  - name: github.com/google/go-github
+    version: 8c08f4fba5e05e0fd2821a5f80cf0cf643bd5314
+  - name: github.com/google/go-querystring
+    version: 53e6ce116135b80d037921a7fdd5138cf32d7a8a

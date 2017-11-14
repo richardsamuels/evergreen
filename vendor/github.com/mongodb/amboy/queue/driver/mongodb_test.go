@@ -1,14 +1,14 @@
 package driver
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/mongodb/grip"
 	"github.com/satori/go.uuid"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"github.com/mongodb/grip"
-	"golang.org/x/net/context"
 	"gopkg.in/mgo.v2"
 )
 
@@ -64,4 +64,16 @@ func (s *MongoDBDriverSuite) TestOpenCloseAffectState() {
 	s.NotNil(s.driver.canceler)
 	// sleep to give it a chance to switch to close the connection
 	time.Sleep(10 * time.Millisecond)
+}
+
+func (s *MongoDBDriverSuite) TestNextIsBlocking() {
+	ctx := context.Background()
+	s.NoError(s.driver.Open(ctx))
+	var cancel context.CancelFunc
+
+	startAt := time.Now()
+	ctx, cancel = context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	s.Nil(s.driver.Next(ctx))
+	s.True(time.Since(startAt) >= 2*time.Second)
 }

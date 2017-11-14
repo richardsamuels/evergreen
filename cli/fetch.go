@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 
+	"context"
+
 	humanize "github.com/dustin/go-humanize"
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/model"
@@ -20,7 +22,6 @@ import (
 	"github.com/evergreen-ci/evergreen/util"
 	"github.com/mongodb/grip"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 const defaultCloneDepth = 500
@@ -238,7 +239,7 @@ func applyPatch(patch *service.RestPatch, rootCloneDir string, conf *model.Proje
 			}
 
 			// skip the module if this build variant does not use it
-			if !util.SliceContains(variant.Modules, module.Name) {
+			if !util.StringSliceContains(variant.Modules, module.Name) {
 				continue
 			}
 
@@ -452,7 +453,6 @@ func downloadUrls(root string, urls chan artifactDownload, workers int) error {
 
 				justFile = filepath.Base(fileName)
 				fmt.Printf("(worker %v) Downloading %v to directory %s%s\n", workerId, justFile, u.path, sizeLog)
-				//sizeTracker := util.SizeTrackingReader{0, resp.Body}
 				_, err = io.Copy(out, resp.Body)
 				if err != nil {
 					errs <- errors.Errorf("Couldn't download %v: %v", u.url, err)

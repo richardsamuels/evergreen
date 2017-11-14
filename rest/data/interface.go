@@ -3,6 +3,7 @@ package data
 import (
 	"time"
 
+	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/auth"
 	"github.com/evergreen-ci/evergreen/model"
 	"github.com/evergreen-ci/evergreen/model/admin"
@@ -135,14 +136,21 @@ type Connector interface {
 	SetAdminSettings(*admin.AdminSettings, *user.DBUser) error
 	// SetAdminBanner sets set the banner in the system-wide settings document
 	SetAdminBanner(string, *user.DBUser) error
+	// SetBannerTheme sets set the banner theme in the system-wide settings document
+	SetBannerTheme(string, *user.DBUser) error
 	// SetAdminBanner sets set the service flags in the system-wide settings document
 	SetServiceFlags(admin.ServiceFlags, *user.DBUser) error
-	RestartFailedTasks(time.Time, time.Time, string, bool) (*restModel.RestartTasksResponse, error)
+	RestartFailedTasks(evergreen.Environment, time.Time, time.Time, string, model.RestartTaskOptions) (*restModel.RestartTasksResponse, error)
 
 	FindCostTaskByProject(string, string, time.Time, time.Time, int, int) ([]task.Task, error)
 
 	// FindRecentTasks finds tasks that have recently finished.
 	FindRecentTasks(int) ([]task.Task, *task.ResultCounts, error)
 	// GetHostStatsByDistro returns host stats broken down by distro
-	GetHostStatsByDistro() ([]host.HostStatsByDistro, error)
+	GetHostStatsByDistro() ([]host.StatsByDistro, error)
+
+	AddPublicKey(*user.DBUser, string, string) error
+	DeletePublicKey(*user.DBUser, string) error
+
+	AddPatchIntent(patch.Intent) error
 }

@@ -10,34 +10,34 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/evergreen-ci/evergreen/model"
 	"github.com/mongodb/grip"
+	"github.com/mongodb/grip/recovery"
 )
 
 // createTaskDirectory makes a directory for the agent to execute
 // the current task within. It changes the necessary variables
 // so that all of the agent's operations will use this folder.
-func (a *Agent) createTaskDirectory(tc *taskContext, taskConfig *model.TaskConfig) (string, error) {
+func (a *Agent) createTaskDirectory(tc *taskContext) (string, error) {
 	h := md5.New()
 
 	_, err := h.Write([]byte(
-		fmt.Sprintf("%s_%d_%d", taskConfig.Task.Id, taskConfig.Task.Execution, os.Getpid())))
+		fmt.Sprintf("%s_%d_%d", tc.taskConfig.Task.Id, tc.taskConfig.Task.Execution, os.Getpid())))
 	if err != nil {
 		tc.logger.Execution().Errorf("Error creating task directory name: %v", err)
 		return "", err
 	}
 
 	dirName := hex.EncodeToString(h.Sum(nil))
-	newDir := filepath.Join(taskConfig.Distro.WorkDir, dirName)
+	newDir := filepath.Join(tc.taskConfig.Distro.WorkDir, dirName)
 
 	tc.logger.Execution().Infof("Making new folder for task execution: %v", newDir)
-	err = os.Mkdir(newDir, 0777)
+	err = os.MkdirAll(newDir, 0777)
 	if err != nil {
 		tc.logger.Execution().Errorf("Error creating task directory: %v", err)
 		return "", err
 	}
 
-	taskConfig.WorkDir = newDir
+	tc.taskConfig.WorkDir = newDir
 	return newDir, nil
 }
 
@@ -48,12 +48,9 @@ func (a *Agent) createTaskDirectory(tc *taskContext, taskConfig *model.TaskConfi
 func (a *Agent) removeTaskDirectory(tc *taskContext) {
 	if tc.taskDirectory == "" {
 		grip.Critical("Task directory is not set")
-	}
-	if tc.taskConfig == nil {
-		grip.Critical("No taskConfig in taskContext")
 		return
 	}
-	grip.Info("Deleting directory for completed task.")
+	grip.Infof("Deleting directory for completed task: %s", tc.taskDirectory)
 
 	if err := os.RemoveAll(tc.taskDirectory); err != nil {
 		grip.Criticalf("Error removing working directory for the task: %v", err)
@@ -78,10 +75,7 @@ func (a *Agent) removeTaskDirectory(tc *taskContext) {
 // directory, so files not located in a directory may still cause
 // issues.
 func tryCleanupDirectory(dir string) {
-	defer func() {
-		m := recover()
-		grip.Warning(m)
-	}()
+	defer recovery.LogStackTraceAndContinue("clean up directories")
 
 	if dir == "" {
 		return
@@ -102,7 +96,7 @@ func tryCleanupDirectory(dir string) {
 		return
 	}
 
-	if strings.HasPrefix(dir, usr.HomeDir) {
+	if strings.HasPrefix(dir, usr.HomeDir) || strings.Contains(dir, "cygwin") {
 		grip.Notice("not cleaning up directory, because it is in the home directory.")
 		return
 	}
@@ -115,6 +109,9 @@ func tryCleanupDirectory(dir string) {
 		}
 
 		if path == dir {
+			return nil
+		}
+		if strings.HasPrefix(info.Name(), ".") {
 			return nil
 		}
 

@@ -1,12 +1,13 @@
 package cli
 
 import (
+	"context"
+	"os"
+
 	"github.com/evergreen-ci/evergreen/agent"
 	"github.com/evergreen-ci/evergreen/rest/client"
 	"github.com/mongodb/grip"
-	"github.com/mongodb/grip/level"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 type AgentCommand struct {
@@ -31,6 +32,10 @@ func (c *AgentCommand) Execute(_ []string) error {
 		WorkingDirectory: c.WorkingDirectory,
 	}
 
+	if err := os.MkdirAll(c.WorkingDirectory, 0777); err != nil {
+		return errors.Wrap(err, "problem creating working directory")
+	}
+
 	agt := agent.New(opts, client.NewCommunicator(c.ServiceURL))
 
 	sender, err := agent.GetSender(opts.LogPrefix, "init")
@@ -38,16 +43,16 @@ func (c *AgentCommand) Execute(_ []string) error {
 		return errors.Wrap(err, "problem configuring logger")
 	}
 
-	if err := grip.SetSender(sender); err != nil {
+	if err = grip.SetSender(sender); err != nil {
 		return errors.Wrap(err, "problem setting up logger")
 	}
 
 	grip.SetName("evergreen.agent")
-	grip.Warning(grip.SetDefaultLevel(level.Info))
-	grip.Warning(grip.SetThreshold(level.Debug))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	err = agt.Start(ctx)
+	grip.Emergency(err)
 
-	return errors.WithStack(agt.Start(ctx))
+	return err
 }

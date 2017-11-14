@@ -1,6 +1,7 @@
 package command
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -9,8 +10,9 @@ import (
 	modelutil "github.com/evergreen-ci/evergreen/model/testutil"
 	"github.com/evergreen-ci/evergreen/rest/client"
 	"github.com/evergreen-ci/evergreen/testutil"
+	"github.com/evergreen-ci/evergreen/util"
 	. "github.com/smartystreets/goconvey/convey"
-	"golang.org/x/net/context"
+	"github.com/stretchr/testify/assert"
 )
 
 const TotalResultCount = 677
@@ -130,4 +132,41 @@ func TestAttachXUnitResults(t *testing.T) {
 
 func TestAttachXUnitWildcardResults(t *testing.T) {
 	runTest(t, WildcardConfig, dBTestsWildcard)
+}
+
+func TestParseAndUpload(t *testing.T) {
+	assert := assert.New(t)
+	xr := xunitResults{
+		Files: []string{"*"},
+	}
+	testConfig := testutil.TestConfig()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	comm := client.NewMock("/dev/null")
+	modelData, err := modelutil.SetupAPITestData(testConfig, "test", "rhel55", WildcardConfig, modelutil.NoPatch)
+	testutil.HandleTestingErr(err, t, "failed to setup test data")
+
+	conf := modelData.TaskConfig
+	conf.WorkDir = "command/testdata/xunit/"
+	logger := comm.GetLoggerProducer(ctx, client.TaskData{ID: conf.Task.Id, Secret: conf.Task.Secret})
+
+	err = xr.parseAndUploadResults(ctx, conf, logger, comm)
+	assert.NoError(err)
+	assert.NoError(logger.Close())
+	messages := comm.GetMockMessages()[conf.Task.Id]
+
+	// spot check messages logged from sending logs to the mock communicator
+	messagesToCheck := []string{
+		"Attaching test logs for pkg1.test.test_things.SomeTests.test_params_method_2",  // junit_1.xml
+		"Attaching test logs for tests.ATest.error",                                     // junit_2.xml
+		"Attaching test logs for test.test_bson.TestBSON.test_basic_encode",             // junit_3.xml
+		"Attaching test logs for unittest.loader.ModuleImportFailure.tests.test_binder", // results.xml
+	}
+	count := 0
+	for _, message := range messages {
+		if util.StringSliceContains(messagesToCheck, message.Message) {
+			count++
+		}
+	}
+	assert.Equal(len(messagesToCheck), count)
 }

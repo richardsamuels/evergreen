@@ -17,10 +17,6 @@ import (
 
 var hostAllocatorTestConf = testutil.TestConfig()
 
-func init() {
-	db.SetGlobalSessionProvider(db.SessionFactoryFromConfig(hostAllocatorTestConf))
-}
-
 func TestDurationBasedNewHostsNeeded(t *testing.T) {
 	/*
 		Note that this is a functional test and its validity relies on the
@@ -523,8 +519,8 @@ func TestComputeDurationBasedNumNewHosts(t *testing.T) {
 			So(numNewHosts, ShouldEqual, 1)
 		})
 
-		Convey("when the durations of existing tasks is slightly more than "+
-			"the maximum duration, exactly two hosts are needed", func() {
+		Convey("when the durations of existing tasks is only slightly more than "+
+			"the maximum duration, exactly one host is needed", func() {
 			scheduledTasksDuration := 12.
 			runningTasksDuration := 13.
 			numExistingHosts := 0.
@@ -532,7 +528,7 @@ func TestComputeDurationBasedNumNewHosts(t *testing.T) {
 			numNewHosts := computeDurationBasedNumNewHosts(
 				scheduledTasksDuration, runningTasksDuration,
 				numExistingHosts, maxDurationPerHost)
-			So(numNewHosts, ShouldEqual, 2)
+			So(numNewHosts, ShouldEqual, 1)
 		})
 	})
 }

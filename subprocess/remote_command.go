@@ -1,6 +1,7 @@
 package subprocess
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os/exec"
@@ -9,28 +10,27 @@ import (
 	"github.com/mongodb/grip"
 	"github.com/mongodb/grip/message"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 type RemoteCommand struct {
-	Id        string
-	CmdString string
+	Id        string `json:"id"`
+	CmdString string `json:"command"`
 
-	Stdout io.Writer
-	Stderr io.Writer
+	Stdout io.Writer `json:"-"`
+	Stderr io.Writer `json:"-"`
 
 	// info necessary for sshing into the remote host
-	RemoteHostName string
-	User           string
-	Options        []string
-	Background     bool
+	RemoteHostName string   `json:"remote_host"`
+	User           string   `json:"user"`
+	Options        []string `json:"options"`
+	Background     bool     `json:"background"`
 
 	// optional flag for hiding sensitive commands from log output
-	LoggingDisabled bool
-	EnvVars         []string
+	LoggingDisabled bool     `json:"disabled_logging"`
+	EnvVars         []string `json:"env_vars"`
 
 	// set after the command is started
-	Cmd *exec.Cmd
+	Cmd *exec.Cmd `json:"-"`
 }
 
 func (rc *RemoteCommand) Run(ctx context.Context) error {
@@ -48,7 +48,10 @@ func (rc *RemoteCommand) Run(ctx context.Context) error {
 
 	errChan := make(chan error)
 	go func() {
-		errChan <- rc.Cmd.Wait()
+		select {
+		case errChan <- rc.Cmd.Wait():
+		case <-ctx.Done():
+		}
 	}()
 
 	select {

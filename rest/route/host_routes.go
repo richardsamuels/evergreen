@@ -1,6 +1,7 @@
 package route
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/evergreen-ci/evergreen/model/host"
@@ -11,7 +12,6 @@ import (
 	"github.com/evergreen-ci/evergreen/util"
 	"github.com/gorilla/mux"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 type hostGetHandler struct {
@@ -110,12 +110,24 @@ func (high *hostIDGetHandler) Execute(ctx context.Context, sc data.Connector) (R
 	}
 
 	hostModel := &model.APIHost{}
-	err = hostModel.BuildFromService(*foundHost)
-	if err != nil {
+	if err = hostModel.BuildFromService(*foundHost); err != nil {
 		if _, ok := err.(*rest.APIError); !ok {
 			err = errors.Wrap(err, "API model error")
 		}
 		return ResponseData{}, err
+	}
+
+	if foundHost.RunningTask != "" {
+		runningTask, err := sc.FindTaskById(foundHost.RunningTask)
+		if err != nil {
+			if apiErr, ok := err.(*rest.APIError); !ok || (ok && apiErr.StatusCode != http.StatusNotFound) {
+				return ResponseData{}, errors.Wrap(err, "Database error")
+			}
+		}
+
+		if err = hostModel.BuildFromService(runningTask); err != nil {
+			return ResponseData{}, errors.Wrap(err, "problem adding task data to host response")
+		}
 	}
 
 	return ResponseData{

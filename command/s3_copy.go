@@ -1,6 +1,7 @@
 package command
 
 import (
+	"context"
 	"path/filepath"
 
 	"github.com/evergreen-ci/evergreen/apimodels"
@@ -10,7 +11,6 @@ import (
 	"github.com/evergreen-ci/evergreen/util"
 	"github.com/mitchellh/mapstructure"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 // The S3CopyPlugin consists of zero or more files that are to be copied
@@ -79,7 +79,7 @@ func (c *s3copy) ParseParams(params map[string]interface{}) error {
 
 // validateParams is a helper function that ensures all
 // the fields necessary for carrying out an S3 copy operation are present
-func (c *s3copy) validateParams() (err error) {
+func (c *s3copy) validateParams() error {
 	if c.AwsKey == "" {
 		return errors.New("s3 AWS key cannot be blank")
 	}
@@ -149,7 +149,7 @@ func (c *s3copy) s3Copy(ctx context.Context,
 	td := client.TaskData{ID: conf.Task.Id, Secret: conf.Task.Secret}
 
 	for _, s3CopyFile := range c.S3CopyFiles {
-		if len(s3CopyFile.BuildVariants) > 0 && !util.SliceContains(
+		if len(s3CopyFile.BuildVariants) > 0 && !util.StringSliceContains(
 			s3CopyFile.BuildVariants, conf.BuildVariant.Name) {
 			continue
 		}

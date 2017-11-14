@@ -1,11 +1,13 @@
 package data
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/db"
+	"github.com/evergreen-ci/evergreen/mock"
 	"github.com/evergreen-ci/evergreen/model"
 	"github.com/evergreen-ci/evergreen/model/admin"
 	"github.com/evergreen-ci/evergreen/model/build"
@@ -18,13 +20,16 @@ import (
 
 type AdminDataSuite struct {
 	ctx Connector
+	env *mock.Environment
 	suite.Suite
 }
 
 func TestDataConnectorSuite(t *testing.T) {
+	testConfig := testutil.TestConfig()
+	testutil.ConfigureIntegrationTest(t, testConfig, "TestDataConnectorSuite")
 	s := new(AdminDataSuite)
 	s.ctx = &DBConnector{}
-	db.SetGlobalSessionProvider(db.SessionFactoryFromConfig(testConfig))
+	db.SetGlobalSessionProvider(testConfig.SessionFactory())
 	testutil.HandleTestingErr(db.ClearCollections(admin.Collection, task.Collection, task.OldCollection, build.Collection, version.Collection), t,
 		"Error clearing collections")
 	b := &build.Build{
@@ -88,15 +93,24 @@ func TestDataConnectorSuite(t *testing.T) {
 }
 
 func TestMockConnectorSuite(t *testing.T) {
+	testConfig := testutil.TestConfig()
+	testutil.ConfigureIntegrationTest(t, testConfig, "TestMockConnectorSuite")
 	s := new(AdminDataSuite)
 	s.ctx = &MockConnector{}
 	suite.Run(t, s)
 }
 
+func (s *AdminDataSuite) SetupSuite() {
+	s.env = &mock.Environment{}
+	s.Require().NoError(s.env.Configure(context.Background(), ""))
+	s.Require().NoError(s.env.Local.Start(context.Background()))
+}
+
 func (s *AdminDataSuite) TestSetAndGetSettings() {
 	u := &user.DBUser{Id: "user"}
 	settings := &admin.AdminSettings{
-		Banner: "test banner",
+		Banner:      "test banner",
+		BannerTheme: admin.Warning,
 		ServiceFlags: admin.ServiceFlags{
 			NotificationsDisabled: true,
 			TaskrunnerDisabled:    true,
@@ -110,6 +124,7 @@ func (s *AdminDataSuite) TestSetAndGetSettings() {
 	s.NoError(err)
 	s.Equal(settings.Banner, settingsFromConnector.Banner)
 	s.Equal(settings.ServiceFlags, settingsFromConnector.ServiceFlags)
+	s.Equal(admin.Warning, string(settings.BannerTheme))
 }
 
 func (s *AdminDataSuite) TestRestart() {
@@ -118,15 +133,17 @@ func (s *AdminDataSuite) TestRestart() {
 	userName := "user"
 
 	// test dry run
-	dryRunResp, err := s.ctx.RestartFailedTasks(startTime, endTime, userName, true)
+	opts := model.RestartTaskOptions{
+		DryRun:     true,
+		OnlyRed:    false,
+		OnlyPurple: false}
+	dryRunResp, err := s.ctx.RestartFailedTasks(s.env, startTime, endTime, userName, opts)
 	s.NoError(err)
 	s.NotZero(len(dryRunResp.TasksRestarted))
 	s.Nil(dryRunResp.TasksErrored)
 
-	// test restarting tasks
-	realResp, err := s.ctx.RestartFailedTasks(startTime, endTime, userName, false)
+	// test that restarting tasks successfully puts a job on the queue
+	opts.DryRun = false
+	_, err = s.ctx.RestartFailedTasks(s.env, startTime, endTime, userName, opts)
 	s.NoError(err)
-	s.NotZero(len(realResp.TasksRestarted))
-	s.NotNil(realResp.TasksErrored)
-	s.Equal(len(dryRunResp.TasksRestarted), len(realResp.TasksRestarted))
 }

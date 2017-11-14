@@ -13,6 +13,7 @@ import (
 	"github.com/evergreen-ci/evergreen/model/user"
 	"github.com/evergreen-ci/evergreen/plugin"
 	"github.com/evergreen-ci/evergreen/util"
+	"github.com/gorilla/csrf"
 	"github.com/gorilla/mux"
 	"github.com/mongodb/grip"
 	"github.com/mongodb/grip/message"
@@ -87,7 +88,6 @@ func (pc projectContext) ToPluginContext(settings evergreen.Settings, dbUser *us
 		Build:      pc.Build,
 		Version:    pc.Version,
 		Patch:      pc.Patch,
-		Project:    pc.Project,
 		ProjectRef: pc.ProjectRef,
 	}
 }
@@ -171,7 +171,7 @@ func (uis *UIServer) isSuperUser(u *user.DBUser) bool {
 	if u == nil {
 		return false
 	}
-	if util.SliceContains(uis.Settings.SuperUsers, u.Id) ||
+	if util.StringSliceContains(uis.Settings.SuperUsers, u.Id) ||
 		len(uis.Settings.SuperUsers) == 0 {
 		return true
 	}
@@ -186,7 +186,7 @@ func isAdmin(u *user.DBUser, project *model.ProjectRef) bool {
 	if u == nil {
 		return false
 	}
-	return util.SliceContains(project.Admins, u.Id)
+	return util.StringSliceContains(project.Admins, u.Id)
 }
 
 // RedirectToLogin forces a redirect to the login page. The redirect param is set on the query
@@ -325,12 +325,6 @@ func (uis *UIServer) LoadProjectContext(rw http.ResponseWriter, r *http.Request)
 
 	// set the cookie for the next request if a project was found
 	if ctx.ProjectRef != nil {
-		ctx.Project, err = model.FindProject("", ctx.ProjectRef)
-		if err != nil {
-			return pc, err
-		}
-
-		// A project was found, update the project cookie for subsequent request.
 		http.SetCookie(rw, &http.Cookie{
 			Name:    ProjectCookieName,
 			Value:   ctx.ProjectRef.Identifier,
@@ -404,6 +398,22 @@ func UserMiddleware(um auth.UserManager) func(rw http.ResponseWriter, r *http.Re
 		}
 		next(rw, r)
 	}
+}
+
+// ForbiddenHandler logs a rejected request befure returning a 403 to the client
+func ForbiddenHandler(w http.ResponseWriter, r *http.Request) {
+	reason := csrf.FailureReason(r)
+	grip.Alert(message.Fields{
+		"action": "forbidden",
+		"method": r.Method,
+		"remote": r.RemoteAddr,
+		"path":   r.URL.Path,
+		"reason": reason.Error(),
+	})
+
+	http.Error(w, fmt.Sprintf("%s - %s",
+		http.StatusText(http.StatusForbidden), reason),
+		http.StatusForbidden)
 }
 
 // Logger is a middleware handler that logs the request as it goes in and the response as it goes out.

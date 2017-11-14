@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"context"
 	"time"
 
 	"github.com/evergreen-ci/evergreen"
@@ -10,7 +11,6 @@ import (
 	"github.com/mongodb/grip/message"
 	"github.com/mongodb/grip/sometimes"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 type Runner struct{}
@@ -55,7 +55,11 @@ func (r *Runner) Run(ctx context.Context, config *evergreen.Settings) error {
 	}
 
 	if err := model.SetProcessRuntimeCompleted(RunnerName, time.Since(startTime)); err != nil {
-		grip.Error(errors.Wrap(err, "problem updating process status"))
+		grip.Error(message.Fields{
+			"message": "problem updating process status",
+			"error":   err,
+			"runner":  RunnerName,
+		})
 	}
 
 	grip.Info(message.Fields{

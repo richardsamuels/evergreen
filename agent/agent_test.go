@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -10,24 +11,25 @@ import (
 	"github.com/evergreen-ci/evergreen/model"
 	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/evergreen-ci/evergreen/rest/client"
+	"github.com/evergreen-ci/evergreen/testutil"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
-	"golang.org/x/net/context"
 )
 
-type AgentTestSuite struct {
+type AgentSuite struct {
 	suite.Suite
-	a                Agent
+	a                *Agent
 	mockCommunicator *client.Mock
 	tc               *taskContext
 	canceler         context.CancelFunc
 }
 
-func TestAgentTestSuite(t *testing.T) {
-	suite.Run(t, new(AgentTestSuite))
+func TestAgentSuite(t *testing.T) {
+	suite.Run(t, new(AgentSuite))
 }
 
-func (s *AgentTestSuite) SetupTest() {
-	s.a = Agent{
+func (s *AgentSuite) SetupTest() {
+	s.a = &Agent{
 		opts: Options{
 			HostID:     "host",
 			HostSecret: "secret",
@@ -56,9 +58,9 @@ func (s *AgentTestSuite) SetupTest() {
 	s.tc.setCurrentCommand(factory())
 }
 
-func (s *AgentTestSuite) TearDownTest() { s.canceler() }
+func (s *AgentSuite) TearDownTest() { s.canceler() }
 
-func (s *AgentTestSuite) TestNextTaskResponseShouldExit() {
+func (s *AgentSuite) TestNextTaskResponseShouldExit() {
 	s.mockCommunicator.NextTaskResponse = &apimodels.NextTaskResponse{
 		TaskId:     "mocktaskid",
 		TaskSecret: "",
@@ -70,7 +72,7 @@ func (s *AgentTestSuite) TestNextTaskResponseShouldExit() {
 	s.Error(err)
 }
 
-func (s *AgentTestSuite) TestTaskWithoutSecret() {
+func (s *AgentSuite) TestTaskWithoutSecret() {
 	s.mockCommunicator.NextTaskResponse = &apimodels.NextTaskResponse{
 		TaskId:     "mocktaskid",
 		TaskSecret: "",
@@ -82,7 +84,7 @@ func (s *AgentTestSuite) TestTaskWithoutSecret() {
 	s.Error(err)
 }
 
-func (s *AgentTestSuite) TestErrorGettingNextTask() {
+func (s *AgentSuite) TestErrorGettingNextTask() {
 	s.mockCommunicator.NextTaskShouldFail = true
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -91,7 +93,7 @@ func (s *AgentTestSuite) TestErrorGettingNextTask() {
 	s.Error(err)
 }
 
-func (s *AgentTestSuite) TestCanceledContext() {
+func (s *AgentSuite) TestCanceledContext() {
 	s.a.opts.AgentSleepInterval = time.Millisecond
 	s.mockCommunicator.NextTaskIsNil = true
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
@@ -100,7 +102,7 @@ func (s *AgentTestSuite) TestCanceledContext() {
 	s.NoError(err)
 }
 
-func (s *AgentTestSuite) TestAgentEndTaskShouldExit() {
+func (s *AgentSuite) TestAgentEndTaskShouldExit() {
 	s.mockCommunicator.EndTaskResponse = &apimodels.EndTaskResponse{ShouldExit: true}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -109,7 +111,7 @@ func (s *AgentTestSuite) TestAgentEndTaskShouldExit() {
 	s.Error(err)
 }
 
-func (s *AgentTestSuite) TestFinishTaskReturnsEndTaskResponse() {
+func (s *AgentSuite) TestFinishTaskReturnsEndTaskResponse() {
 	endTaskResponse := &apimodels.EndTaskResponse{Message: "end task response"}
 	s.mockCommunicator.EndTaskResponse = endTaskResponse
 	ctx, cancel := context.WithCancel(context.Background())
@@ -120,7 +122,7 @@ func (s *AgentTestSuite) TestFinishTaskReturnsEndTaskResponse() {
 	s.NoError(err)
 }
 
-func (s *AgentTestSuite) TestFinishTaskEndTaskError() {
+func (s *AgentSuite) TestFinishTaskEndTaskError() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -130,7 +132,7 @@ func (s *AgentTestSuite) TestFinishTaskEndTaskError() {
 	s.Error(err)
 }
 
-func (s *AgentTestSuite) TestCancelStartTask() {
+func (s *AgentSuite) TestCancelStartTask() {
 	resetIdleTimeout := make(chan time.Duration)
 	complete := make(chan string)
 	go func() {
@@ -145,7 +147,7 @@ func (s *AgentTestSuite) TestCancelStartTask() {
 	s.Zero(len(msgs))
 }
 
-func (s *AgentTestSuite) TestCancelRunCommands() {
+func (s *AgentSuite) TestCancelRunCommands() {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	cmd := model.PluginCommandConf{
@@ -160,7 +162,7 @@ func (s *AgentTestSuite) TestCancelRunCommands() {
 	s.Equal("runCommands canceled", err.Error())
 }
 
-func (s *AgentTestSuite) TestRunPreTaskCommands() {
+func (s *AgentSuite) TestRunPreTaskCommands() {
 	s.tc.taskConfig = &model.TaskConfig{
 		BuildVariant: &model.BuildVariant{
 			Name: "buildvariant_id",
@@ -191,7 +193,7 @@ func (s *AgentTestSuite) TestRunPreTaskCommands() {
 	s.Contains(msgs[len(msgs)-1].Message, "Finished running pre-task commands")
 }
 
-func (s *AgentTestSuite) TestRunPostTaskCommands() {
+func (s *AgentSuite) TestRunPostTaskCommands() {
 	s.tc.taskConfig = &model.TaskConfig{
 		BuildVariant: &model.BuildVariant{
 			Name: "buildvariant_id",
@@ -204,7 +206,8 @@ func (s *AgentTestSuite) TestRunPostTaskCommands() {
 				SingleCommand: &model.PluginCommandConf{
 					Command: "shell.exec",
 					Params: map[string]interface{}{
-						"script": "echo hi",
+						"working_dir": testutil.GetDirectoryOfFile(),
+						"script":      "echo hi",
 					},
 				},
 			},
@@ -221,7 +224,7 @@ func (s *AgentTestSuite) TestRunPostTaskCommands() {
 	s.Contains(msgs[len(msgs)-1].Message, "Finished running post-task commands")
 }
 
-func (s *AgentTestSuite) TestEndTaskResponse() {
+func (s *AgentSuite) TestEndTaskResponse() {
 	factory, ok := command.GetCommandFactory("setup.initial")
 	s.True(ok)
 	s.tc.setCurrentCommand(factory())
@@ -247,7 +250,7 @@ func (s *AgentTestSuite) TestEndTaskResponse() {
 	s.Equal(evergreen.TaskFailed, detail.Status)
 }
 
-func (s *AgentTestSuite) TestAbort() {
+func (s *AgentSuite) TestAbort() {
 	s.mockCommunicator.HeartbeatShouldAbort = true
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -257,13 +260,7 @@ func (s *AgentTestSuite) TestAbort() {
 	s.Equal("initial task setup", s.mockCommunicator.EndTaskResult.Detail.Description)
 }
 
-func (s *AgentTestSuite) TestAgentConstructorSetsHostData() {
-	agent := New(Options{HostID: "host_id", HostSecret: "host_secret"}, client.NewMock("url"))
-	s.Equal("host_id", agent.comm.GetHostID())
-	s.Equal("host_secret", agent.comm.GetHostSecret())
-}
-
-func (s *AgentTestSuite) TestWaitCompleteSuccess() {
+func (s *AgentSuite) TestWaitCompleteSuccess() {
 	heartbeat := make(chan string)
 	complete := make(chan string)
 	go func() {
@@ -278,7 +275,7 @@ func (s *AgentTestSuite) TestWaitCompleteSuccess() {
 	s.False(s.tc.hadTimedOut())
 }
 
-func (s *AgentTestSuite) TestWaitCompleteFailure() {
+func (s *AgentSuite) TestWaitCompleteFailure() {
 	heartbeat := make(chan string)
 	complete := make(chan string)
 	go func() {
@@ -293,7 +290,7 @@ func (s *AgentTestSuite) TestWaitCompleteFailure() {
 	s.False(s.tc.hadTimedOut())
 }
 
-func (s *AgentTestSuite) TestWaitExecTimeout() {
+func (s *AgentSuite) TestWaitExecTimeout() {
 	heartbeat := make(chan string)
 	complete := make(chan string)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -305,7 +302,7 @@ func (s *AgentTestSuite) TestWaitExecTimeout() {
 	s.False(s.tc.hadTimedOut())
 }
 
-func (s *AgentTestSuite) TestWaitHeartbeatTimeout() {
+func (s *AgentSuite) TestWaitHeartbeatTimeout() {
 	heartbeat := make(chan string)
 	complete := make(chan string)
 	go func() {
@@ -321,7 +318,7 @@ func (s *AgentTestSuite) TestWaitHeartbeatTimeout() {
 	s.False(s.tc.hadTimedOut())
 }
 
-func (s *AgentTestSuite) TestWaitIdleTimeout() {
+func (s *AgentSuite) TestWaitIdleTimeout() {
 	s.tc = &taskContext{
 		task: client.TaskData{
 			ID:     "task_id",
@@ -362,4 +359,12 @@ func (s *AgentTestSuite) TestWaitIdleTimeout() {
 	status := s.a.wait(ctx, innerCtx, s.tc, heartbeat, complete)
 	s.Equal(evergreen.TaskFailed, status)
 	s.False(s.tc.hadTimedOut())
+}
+
+func TestAgentConstructorSetsHostData(t *testing.T) {
+	assert := assert.New(t) // nolint
+	agent := New(Options{HostID: "host_id", HostSecret: "host_secret"}, client.NewMock("url"))
+
+	assert.Equal("host_id", agent.comm.GetHostID())
+	assert.Equal("host_secret", agent.comm.GetHostSecret())
 }

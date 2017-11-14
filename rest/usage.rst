@@ -1148,3 +1148,77 @@ Fetch Version Cost By VersionID
 
  Fetches version cost associated with the specific version
 
+Keys
+----
+
+Objects
+~~~~~~~
+
+.. list-table:: **Key**
+   :widths: 25 10 55
+   :header-rows: 1
+
+   * - Name
+     - Type
+     - Description
+   * - name
+     - string
+     - The unique name of the public key
+   * - key
+     - string
+     - The public key, (e.g: 'ssh-rsa ...')
+
+Endpoints
+~~~~~~~~~
+
+Fetch Current User's SSH Public Keys
+````````````````````````````````````
+
+::
+
+ GET /keys
+
+ Fetch the SSH public keys of the current user (as determined by the
+ Api-User and Api-Key headers) as an array of Key objects.
+
+ If the user has no public keys, expect: []
+
+Add a Public Key to the Current User
+````````````````````````````````````
+
+::
+
+ POST /keys
+
+ Add a single public key to the current user (as determined by the
+ Api-User and Api-Key headers) as a Key object. If you attempt to insert a key
+ with a duplicate name, it will fail
+
+ Both name and key must not be empty strings, nor strings consisting entirely
+ of whitespace
+
+ If the key was successfully inserted, the server will return HTTP status code
+ 200 OK
+
+ If the a key with the supplied name already exists, the key will not be added,
+ and the route will return status code 400 Bad Request.
+
+ Any other status code indicates that the key was not successfully added.
+
+Delete A Specified Public Key from the Current User
+```````````````````````````````````````````````````
+
+::
+
+ DELETE /keys/{key_name}
+
+ Delete the SSH public key with name '{key_name}' from the current user (as
+ determined by the Api-User and Api-Key headers).
+
+ If a public key with name '{key_name}' was successfully deleted, HTTP
+ status code 200 OK will be returned.
+
+ If a public key with name '{key_name}' does not exist, HTTP status code 400
+ Bad Request will be returned.
+
+ Any other code indicates that the public key was not deleted

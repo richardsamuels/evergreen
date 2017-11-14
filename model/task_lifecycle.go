@@ -93,11 +93,10 @@ func ActivatePreviousTask(taskId, caller string) error {
 
 // reset task finds a task, attempts to archive it, and resets the task and resets the TaskCache in the build as well.
 func resetTask(taskId string) error {
-	t, err := task.FindOne(task.ById(taskId))
+	t, err := task.FindOneNoMerge(task.ById(taskId))
 	if err != nil {
 		return errors.WithStack(err)
 	}
-
 	if err = t.Archive(); err != nil {
 		return errors.Wrap(err, "can't restart task because it can't be archived")
 	}
@@ -116,7 +115,7 @@ func resetTask(taskId string) error {
 
 // TryResetTask resets a task
 func TryResetTask(taskId, user, origin string, p *Project, detail *apimodels.TaskEndDetail) error {
-	t, err := task.FindOne(task.ById(taskId))
+	t, err := task.FindOneNoMerge(task.ById(taskId))
 	if err != nil {
 		return errors.WithStack(err)
 	}
@@ -316,8 +315,9 @@ func MarkEnd(taskId, caller string, finishTime time.Time, detail *apimodels.Task
 		return errors.Wrap(UpdateBuildAndVersionStatusForTask(t.Id),
 			"Error updating build status (1)")
 	}
-	if detail.Status == evergreen.TaskFailed {
-		shouldStepBack, err := getStepback(t.Id, p)
+	if detail.Status == evergreen.TaskFailed && detail.Type != "system" {
+		var shouldStepBack bool
+		shouldStepBack, err = getStepback(t.Id, p)
 		if err != nil {
 			return errors.WithStack(err)
 		}
@@ -361,7 +361,7 @@ func updateMakespans(b *build.Build) error {
 // status of the build based on the task's status.
 func UpdateBuildAndVersionStatusForTask(taskId string) error {
 	// retrieve the task by the task id
-	t, err := task.FindOne(task.ById(taskId))
+	t, err := task.FindOneNoMerge(task.ById(taskId))
 	if err != nil {
 		return errors.WithStack(err)
 	}
@@ -609,24 +609,58 @@ func MarkTaskDispatched(t *task.Task, hostId, distroId string) error {
 	return nil
 }
 
+type RestartTaskOptions struct {
+	DryRun     bool
+	OnlyRed    bool
+	OnlyPurple bool
+}
+
+type RestartTaskResults struct {
+	TasksRestarted []string
+	TasksErrored   []string
+}
+
 // RestartFailedTasks attempts to restart failed tasks that started between 2 times
 // It returns a slice of task IDs that were successfully restarted as well as a slice
 // of task IDs that failed to restart
-func RestartFailedTasks(startTime, endTime time.Time, user string, dryRun bool) ([]string, []string, error) {
+// opts.dryRun will return the tasks that will be restarted if sent true
+// opts.red and opts.purple will only restart tasks that were failed due to the test
+// or due to the system, respectively
+func RestartFailedTasks(startTime, endTime time.Time, user string, opts RestartTaskOptions) (RestartTaskResults, error) {
+	results := RestartTaskResults{}
+	if opts.OnlyRed && opts.OnlyPurple {
+		opts.OnlyRed = false
+		opts.OnlyPurple = false
+	}
 	tasksToRestart, err := task.Find(task.ByTimeStartedAndFailed(startTime, endTime))
 	if err != nil {
-		return nil, nil, err
+		return results, err
 	}
-	tasksRestarted := make([]string, 0)
-	var tasksErrored []string
-	if !dryRun {
-		tasksErrored = make([]string, 0)
+	// if only want red or purple, remove the other color tasks from the slice
+	if opts.OnlyRed {
+		tasksToRestart = task.FilterTasksOnStatus(tasksToRestart, evergreen.TaskFailed,
+			evergreen.TaskTestTimedOut)
+	} else if opts.OnlyPurple {
+		tasksToRestart = task.FilterTasksOnStatus(tasksToRestart, evergreen.TaskSystemFailed,
+			evergreen.TaskSystemTimedOut,
+			evergreen.TaskSystemUnresponse)
 	}
-	for _, t := range tasksToRestart {
-		if dryRun {
-			tasksRestarted = append(tasksRestarted, t.Id)
-			continue
+
+	// if this is a dry run, immediately return the tasks found
+	if opts.DryRun {
+		for _, t := range tasksToRestart {
+			results.TasksRestarted = append(results.TasksRestarted, t.Id)
 		}
+		return results, nil
+	}
+
+	return doRestartFailedTasks(tasksToRestart, user, results), nil
+}
+
+func doRestartFailedTasks(tasks []task.Task, user string, results RestartTaskResults) RestartTaskResults {
+	var tasksErrored []string
+
+	for _, t := range tasks {
 		projectRef, err := FindOneProjectRef(t.Project)
 		if err != nil {
 			tasksErrored = append(tasksErrored, t.Id)
@@ -659,8 +693,10 @@ func RestartFailedTasks(startTime, endTime time.Time, user string, dryRun bool) 
 				"error":   err.Error(),
 			})
 		} else {
-			tasksRestarted = append(tasksRestarted, t.Id)
+			results.TasksRestarted = append(results.TasksRestarted, t.Id)
 		}
 	}
-	return tasksRestarted, tasksErrored, nil
+	results.TasksErrored = tasksErrored
+
+	return results
 }

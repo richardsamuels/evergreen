@@ -3,12 +3,14 @@
 package vsphere
 
 import (
+	"context"
 	"time"
 
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/cloud"
 	"github.com/evergreen-ci/evergreen/hostutil"
 	"github.com/evergreen-ci/evergreen/model/distro"
+	"github.com/evergreen-ci/evergreen/model/event"
 	"github.com/evergreen-ci/evergreen/model/host"
 	"github.com/mitchellh/mapstructure"
 	"github.com/mongodb/grip"
@@ -127,6 +129,7 @@ func (m *Manager) SpawnHost(h *host.Host) (*host.Host, error) {
 		"provider": h.Provider,
 		"object":   h,
 	})
+	event.LogHostStarted(h.Id)
 
 	return h, nil
 }
@@ -190,7 +193,7 @@ func (m *Manager) IsSSHReachable(host *host.Host, keyPath string) (bool, error) 
 		return false, errors.Wrapf(err, "failed to get SSH options for host %s", host.Id)
 	}
 
-	return hostutil.CheckSSHResponse(host, opts)
+	return hostutil.CheckSSHResponse(context.TODO(), host, opts)
 }
 
 // GetDNSName returns the IPv4 address of the host.

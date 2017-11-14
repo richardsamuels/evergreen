@@ -11,12 +11,14 @@ import (
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/auth"
 	"github.com/evergreen-ci/evergreen/db"
+	"github.com/evergreen-ci/evergreen/model"
 	"github.com/evergreen-ci/evergreen/model/admin"
 	"github.com/evergreen-ci/evergreen/model/user"
 	"github.com/evergreen-ci/evergreen/plugin"
 	"github.com/evergreen-ci/evergreen/rest/route"
 	"github.com/evergreen-ci/evergreen/util"
 	"github.com/evergreen-ci/render"
+	"github.com/gorilla/csrf"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/sessions"
 	"github.com/mongodb/grip"
@@ -58,13 +60,17 @@ type UIServer struct {
 type ViewData struct {
 	User        *user.DBUser
 	ProjectData projectContext
+	Project     model.Project
 	Flashes     []interface{}
 	Banner      string
+	BannerTheme string
+	Csrf        htmlTemplate.HTML
+	JiraHost    string
 }
 
 func NewUIServer(settings *evergreen.Settings, home string) (*UIServer, error) {
 	uis := &UIServer{}
-	db.SetGlobalSessionProvider(db.SessionFactoryFromConfig(settings))
+	db.SetGlobalSessionProvider(settings.SessionFactory())
 
 	if err := settings.Validate(); err != nil {
 		return nil, errors.WithStack(err)
@@ -100,8 +106,8 @@ func (uis *UIServer) InitPlugins() error {
 
 // NewRouter sets up a request router for the UI, installing
 // hard-coded routes as well as those belonging to plugins.
-func (uis *UIServer) NewRouter() (*mux.Router, error) {
-	r := mux.NewRouter().StrictSlash(true)
+func (uis *UIServer) AttachRoutes(r *mux.Router) error {
+	r = r.StrictSlash(true)
 
 	// User login and logout
 	r.HandleFunc("/login", uis.loginPage).Methods("GET")
@@ -257,7 +263,7 @@ func (uis *UIServer) NewRouter() (*mux.Router, error) {
 		pluginSettings := uis.Settings.Plugins[pl.Name()]
 		err := pl.Configure(pluginSettings)
 		if err != nil {
-			return nil, errors.Wrapf(err, "Failed to configure plugin %v", pl.Name())
+			return errors.Wrapf(err, "Failed to configure plugin %v", pl.Name())
 		}
 
 		// check if a plugin is an app level plugin first
@@ -265,13 +271,12 @@ func (uis *UIServer) NewRouter() (*mux.Router, error) {
 			// register the app level pa}rt of the plugin
 			appFunction := uis.GetPluginHandler(appPlugin.GetAppPluginInfo(), pl.Name())
 			rootPluginRouter.HandleFunc(fmt.Sprintf("/%v/app", pl.Name()), uis.loadCtx(appFunction))
-
 		}
 
 		// check if there are any errors getting the panel config
 		uiConf, err := pl.GetPanelConfig()
 		if err != nil {
-			panic(fmt.Sprintf("Error getting UI config for plugin %v: %v", pl.Name(), err))
+			return errors.Wrapf(err, "Error getting UI config for plugin %v: %v", pl.Name())
 		}
 		if uiConf == nil {
 			grip.Debugf("No UI config needed for plugin %s, skipping", pl.Name())
@@ -295,7 +300,7 @@ func (uis *UIServer) NewRouter() (*mux.Router, error) {
 		util.MountHandler(rootPluginRouter, fmt.Sprintf("/%v/", pl.Name()), withPluginUser(pluginUIhandler))
 	}
 
-	return r, nil
+	return nil
 }
 
 // LoggedError logs the given error and writes an HTTP response with its details formatted
@@ -331,16 +336,30 @@ func (uis *UIServer) GetCommonViewData(w http.ResponseWriter, r *http.Request, n
 		grip.Error("no user attached to request")
 	}
 	projectCtx, err := GetProjectContext(r)
-	if needsProject && err != nil {
-		grip.Errorf(errors.Wrap(err, "no project attached to request").Error())
+	if err != nil {
+		grip.Errorf(errors.Wrap(err, "error getting project context").Error())
+		uis.ProjectNotFound(projectCtx, w, r)
+		return ViewData{}
+	}
+	if needsProject {
+		project, err := projectCtx.GetProject()
+		if err != nil || project == nil {
+			grip.Errorf(errors.Wrap(err, "no project attached to request").Error())
+			uis.ProjectNotFound(projectCtx, w, r)
+			return ViewData{}
+		}
+		viewData.Project = *project
 	}
 	settings, err := admin.GetSettings()
 	if err != nil {
 		grip.Errorf(errors.Wrap(err, "unable to retrieve admin settings").Error())
 	}
 	viewData.Banner = settings.Banner
+	viewData.BannerTheme = string(settings.BannerTheme)
 	viewData.User = userCtx
 	viewData.ProjectData = projectCtx
 	viewData.Flashes = PopFlashes(uis.CookieStore, r, w)
+	viewData.Csrf = csrf.TemplateField(r)
+	viewData.JiraHost = uis.Settings.Jira.Host
 	return viewData
 }

@@ -52,35 +52,23 @@ type APIHostStatsByDistro struct {
 }
 
 type apiHostStatsForDistro struct {
-	Distro string                   `json:"distro"`
-	Stats  apiSingleDistroHostStats `json:"stats"`
-}
-
-type apiSingleDistroHostStats struct {
-	Status string                   `json:"status"`
-	Counts apiSingleStatusHostStats `json:"counts"`
-}
-
-type apiSingleStatusHostStats struct {
-	NumHosts int `json:"num_hosts"`
-	NumTasks int `json:"running_tasks"`
+	Distro   APIString `json:"distro"`
+	Status   APIString `json:"status"`
+	NumHosts int       `json:"num_hosts"`
+	NumTasks int       `json:"running_tasks"`
 }
 
 // BuildFromService takes the slice of stats returned by GetHostStatsByDistro and embeds
 // them so that the return value is a slice of distros
 func (s *APIHostStatsByDistro) BuildFromService(h interface{}) error {
 	switch v := h.(type) {
-	case []host.HostStatsByDistro:
+	case []host.StatsByDistro:
 		for _, entry := range v {
 			d := apiHostStatsForDistro{
-				Distro: entry.Distro,
-				Stats: apiSingleDistroHostStats{
-					Status: entry.Status,
-					Counts: apiSingleStatusHostStats{
-						NumHosts: entry.Count,
-						NumTasks: entry.NumTasks,
-					},
-				},
+				Distro:   APIString(entry.Distro),
+				Status:   APIString(entry.Status),
+				NumHosts: entry.Count,
+				NumTasks: entry.NumTasks,
 			}
 
 			s.Distros = append(s.Distros, d)

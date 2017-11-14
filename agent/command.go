@@ -1,35 +1,40 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	"github.com/evergreen-ci/evergreen/command"
 	"github.com/evergreen-ci/evergreen/model"
 	"github.com/mongodb/grip"
+	"github.com/mongodb/grip/recovery"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
-func (a *Agent) runCommands(ctx context.Context, tc *taskContext, commands []model.PluginCommandConf, isTaskCommands bool) error {
+func (a *Agent) runCommands(ctx context.Context, tc *taskContext, commands []model.PluginCommandConf, isTaskCommands bool) (err error) {
+	var cmds []command.Command
+	defer func() { err = recovery.HandlePanicWithError(recover(), err, "run commands") }()
+
 	for i, commandInfo := range commands {
 		if ctx.Err() != nil {
-			grip.Error("task canceled")
+			grip.Error("runCommands canceled")
 			return errors.New("runCommands canceled")
 		}
 
-		cmds, err := command.Render(commandInfo, tc.taskConfig.Project.Functions)
+		cmds, err = command.Render(commandInfo, tc.taskConfig.Project.Functions)
 		if err != nil {
 			tc.logger.Task().Errorf("Couldn't parse plugin command '%v': %v", commandInfo.Command, err)
 			if isTaskCommands {
 				return err
 			}
+			err = nil
 			continue
 		}
 
 		for idx, cmd := range cmds {
 			if ctx.Err() != nil {
-				grip.Error("task canceled")
+				grip.Error("runCommands canceled")
 				return errors.New("runCommands canceled")
 			}
 
@@ -64,13 +69,14 @@ func (a *Agent) runCommands(ctx context.Context, tc *taskContext, commands []mod
 
 			if isTaskCommands {
 				tc.setCurrentCommand(cmd)
-				tc.setCurrentTimeout(a.getTimeout(commandInfo))
+				tc.setCurrentTimeout(a.getTimeout(cmd))
 				a.comm.UpdateLastMessageTime()
+			} else {
+				tc.setCurrentTimeout(defaultIdleTimeout)
 			}
 
 			start := time.Now()
 			err = cmd.Execute(ctx, a.comm, tc.logger, tc.taskConfig)
-			tc.setCurrentTimeout(defaultCmdTimeout)
 
 			tc.logger.Execution().Infof("Finished %v in %v", fullCommandName, time.Since(start).String())
 			if err != nil {
@@ -81,7 +87,8 @@ func (a *Agent) runCommands(ctx context.Context, tc *taskContext, commands []mod
 			}
 		}
 	}
-	return nil
+
+	return errors.WithStack(err)
 }
 
 // runTaskCommands runs all commands for the task currently assigned to the agent and
@@ -110,12 +117,11 @@ func (a *Agent) runTaskCommands(ctx context.Context, tc *taskContext) error {
 	return nil
 }
 
-func (a *Agent) getTimeout(commandInfo model.PluginCommandConf) time.Duration {
-	var timeoutPeriod = defaultCmdTimeout
-	if commandInfo.TimeoutSecs > 0 {
-		timeoutPeriod = time.Duration(commandInfo.TimeoutSecs) * time.Second
+func (a *Agent) getTimeout(cmd command.Command) time.Duration {
+	if cmd.IdleTimeout() > 0 {
+		return cmd.IdleTimeout()
 	}
-	return timeoutPeriod
+	return defaultIdleTimeout
 }
 
 func (a *Agent) getCommandName(commandInfo model.PluginCommandConf, cmd command.Command) string {

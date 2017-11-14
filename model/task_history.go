@@ -8,10 +8,10 @@ import (
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/apimodels"
 	"github.com/evergreen-ci/evergreen/db"
-	"github.com/evergreen-ci/evergreen/db/bsonutil"
 	"github.com/evergreen-ci/evergreen/model/task"
 	"github.com/evergreen-ci/evergreen/model/version"
 	"github.com/evergreen-ci/evergreen/util"
+	"github.com/mongodb/anser/bsonutil"
 	"github.com/mongodb/grip"
 	"github.com/pkg/errors"
 	"gopkg.in/mgo.v2"
@@ -299,7 +299,7 @@ func (self *taskHistoryIterator) GetDistinctTestNames(numCommits int) ([]string,
 					task.DisplayNameKey:  self.TaskName,
 				},
 			},
-			{"$sort": bson.D{{task.RevisionOrderNumberKey, -1}}},
+			{"$sort": bson.D{{Name: task.RevisionOrderNumberKey, Value: -1}}},
 			{"$limit": numCommits},
 			{"$unwind": fmt.Sprintf("$%v", task.TestResultsKey)},
 			{"$group": bson.M{"_id": fmt.Sprintf("$%v.%v", task.TestResultsKey, task.TestResultTestFileKey)}},
@@ -384,7 +384,7 @@ func (t *TestHistoryParameters) validate() []string {
 		evergreen.TestSucceededStatus,
 	}
 	for _, status := range t.TestStatuses {
-		if !util.SliceContains(validTestStatuses, status) {
+		if !util.StringSliceContains(validTestStatuses, status) {
 			validationErrors = append(validationErrors, fmt.Sprintf("invalid test status in parameters: %v", status))
 		}
 	}
@@ -392,7 +392,7 @@ func (t *TestHistoryParameters) validate() []string {
 	// task statuses can be fail, pass, or timeout.
 	validTaskStatuses := []string{evergreen.TaskFailed, evergreen.TaskSucceeded, TaskTimeout, TaskSystemFailure}
 	for _, status := range t.TaskStatuses {
-		if !util.SliceContains(validTaskStatuses, status) {
+		if !util.StringSliceContains(validTaskStatuses, status) {
 			validationErrors = append(validationErrors, fmt.Sprintf("invalid task status in parameters: %v", status))
 		}
 	}
@@ -621,8 +621,8 @@ func buildTestHistoryQuery(testHistoryParameters *TestHistoryParameters) ([]bson
 	}
 	pipeline = append(pipeline,
 		bson.M{"$sort": bson.D{
-			{task.RevisionOrderNumberKey, testHistoryParameters.Sort},
-			{task.TestResultsKey + "." + task.TestResultTestFileKey, testHistoryParameters.Sort},
+			{Name: task.RevisionOrderNumberKey, Value: testHistoryParameters.Sort},
+			{Name: task.TestResultsKey + "." + task.TestResultTestFileKey, Value: testHistoryParameters.Sort},
 		}},
 		bson.M{"$project": bson.M{
 			TestFileKey:        "$" + task.TestResultsKey + "." + task.TestResultTestFileKey,

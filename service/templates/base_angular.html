@@ -57,7 +57,7 @@
         </style>
         <script type="text/javascript">
         {{if .ProjectData}}
-            {{if .ProjectData.Project}}
+            {{if .ProjectData.ProjectRef}}
                 var project = {{.ProjectData.ProjectRef.Identifier}};
                 var projectName = {{.ProjectData.ProjectRef.DisplayName}};
             {{end}}
@@ -72,6 +72,7 @@
             {{end}}
         {{end}}
         </script>
+        {{.Csrf}}
     </head>
 
     <body ng-controller="ProjectController">

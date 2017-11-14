@@ -4,11 +4,13 @@ import (
 	"io/ioutil"
 	"time"
 
+	legacyDB "github.com/evergreen-ci/evergreen/db"
+	"github.com/mongodb/amboy/logger"
 	"github.com/mongodb/grip"
-	"github.com/mongodb/grip/message"
+	"github.com/mongodb/grip/level"
 	"github.com/mongodb/grip/send"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
+	mgo "gopkg.in/mgo.v2"
 	"gopkg.in/yaml.v2"
 )
 
@@ -78,6 +80,8 @@ type ClientConfig struct {
 // APIConfig holds relevant log and listener settings for the API server.
 type APIConfig struct {
 	HttpListenAddr string
+	// TODO: where is the right place for this?
+	GithubWebhookSecret string `yaml:"github_webhook_secret"`
 }
 
 // UIConfig holds relevant settings for the UI server.
@@ -99,14 +103,8 @@ type UIConfig struct {
 	// does not yet natively support SSL UI connections, but this option
 	// is available, for example, for deployments behind HTTPS load balancers.
 	SecureCookies bool
-}
-
-// MonitorConfig holds logging settings for the monitor process.
-type MonitorConfig struct{}
-
-// RunnerConfig holds logging and timing settings for the runner process.
-type RunnerConfig struct {
-	IntervalSeconds int64
+	// CsrfKey is a 32-byte key used to generate tokens that validate UI requests
+	CsrfKey string
 }
 
 // HostInitConfig holds logging settings for the hostinit process.
@@ -132,11 +130,8 @@ type SMTPConfig struct {
 
 // SchedulerConfig holds relevant settings for the scheduler process.
 type SchedulerConfig struct {
-	MergeToggle int
-}
-
-// TaskRunnerConfig holds logging settings for the scheduler process.
-type TaskRunnerConfig struct {
+	MergeToggle int    `yaml:"mergetoggle"`
+	TaskFinder  string `yaml:"task_finder"`
 }
 
 // CloudProviders stores configuration settings for the supported cloud host providers.
@@ -228,9 +223,36 @@ type DBSettings struct {
 	WriteConcernSettings WriteConcern `yaml:"write_concern"`
 }
 
+type LoggerConfig struct {
+	Buffer         LogBuffering `yaml:"buffer"`
+	DefaultLevel   string       `yaml:"default_level"`
+	ThresholdLevel string       `yaml:"threshold_level"`
+}
+
+func (c LoggerConfig) Info() send.LevelInfo {
+	return send.LevelInfo{
+		Default:   level.FromString(c.DefaultLevel),
+		Threshold: level.FromString(c.ThresholdLevel),
+	}
+}
+
 type LogBuffering struct {
 	DurationSeconds int `yaml:"duration_seconds"`
-	BufferCount     int `yaml:"count"`
+	Count           int `yaml:"count"`
+}
+
+type AmboyConfig struct {
+	Name           string `yaml:"name"`
+	DB             string `yaml:"database"`
+	PoolSizeLocal  int    `yaml:"pool_size_local"`
+	PoolSizeRemote int    `yaml:"pool_size_remote"`
+	LocalStorage   int    `yaml:"local_storage_size"`
+}
+
+type SlackConfig struct {
+	Options *send.SlackOptions `yaml:"options"`
+	Token   string             `yaml:"token"`
+	Level   string             `yaml:"level"`
 }
 
 // Settings contains all configuration settings for running Evergreen.
@@ -244,24 +266,23 @@ type Settings struct {
 	SuperUsers          []string                  `yaml:"superusers"`
 	Jira                JiraConfig                `yaml:"jira"`
 	Splunk              send.SplunkConnectionInfo `yaml:"splunk"`
+	Slack               SlackConfig               `yaml:"slack"`
 	Providers           CloudProviders            `yaml:"providers"`
 	Keys                map[string]string         `yaml:"keys"`
 	Credentials         map[string]string         `yaml:"credentials"`
 	AuthConfig          AuthConfig                `yaml:"auth"`
 	RepoTracker         RepoTrackerConfig         `yaml:"repotracker"`
-	Monitor             MonitorConfig             `yaml:"monitor"`
 	Api                 APIConfig                 `yaml:"api"`
 	Alerts              AlertsConfig              `yaml:"alerts"`
 	Ui                  UIConfig                  `yaml:"ui"`
 	HostInit            HostInitConfig            `yaml:"hostinit"`
 	Notify              NotifyConfig              `yaml:"notify"`
-	Runner              RunnerConfig              `yaml:"runner"`
 	Scheduler           SchedulerConfig           `yaml:"scheduler"`
-	TaskRunner          TaskRunnerConfig          `yaml:"taskrunner"`
+	Amboy               AmboyConfig               `yaml:"amboy"`
 	Expansions          map[string]string         `yaml:"expansions"`
 	Plugins             PluginConfig              `yaml:"plugins"`
 	IsNonProd           bool                      `yaml:"isnonprod"`
-	LogBuffering        LogBuffering              `yaml:"log_buffering"`
+	LoggerConfig        LoggerConfig              `yaml:"logger_config"`
 	LogPath             string                    `yaml:"log_path"`
 	PprofPort           string                    `yaml:"pprof_port"`
 }
@@ -293,7 +314,7 @@ func (settings *Settings) Validate() error {
 	return nil
 }
 
-func (s *Settings) GetSender() (send.Sender, error) {
+func (s *Settings) GetSender(env Environment) (send.Sender, error) {
 	var (
 		sender   send.Sender
 		fallback send.Sender
@@ -301,14 +322,22 @@ func (s *Settings) GetSender() (send.Sender, error) {
 		senders  []send.Sender
 	)
 
-	fallback = send.MakeErrorLogger()
+	levelInfo := s.LoggerConfig.Info()
+
+	fallback, err = send.NewErrorLogger("evergreen.err",
+		send.LevelInfo{Default: level.Info, Threshold: level.Debug})
+	if err != nil {
+		return nil, errors.Wrap(err, "problem configuring err fallback logger")
+	}
 
 	if s.LogPath == LocalLoggingOverride {
 		// log directly to systemd if possible, and log to
 		// standard output otherwise.
 		sender = getSystemLogger()
-		err = sender.SetErrorHandler(send.ErrorHandlerFromSender(fallback))
-		if err != nil {
+		if err = sender.SetLevel(levelInfo); err != nil {
+			return nil, errors.Wrap(err, "problem setting level")
+		}
+		if err = sender.SetErrorHandler(send.ErrorHandlerFromSender(fallback)); err != nil {
 			return nil, errors.Wrap(err, "problem setting error handler")
 		}
 	} else {
@@ -316,8 +345,10 @@ func (s *Settings) GetSender() (send.Sender, error) {
 		if err != nil {
 			return nil, errors.Wrap(err, "could not configure file logger")
 		}
-		err = sender.SetErrorHandler(send.ErrorHandlerFromSender(fallback))
-		if err != nil {
+		if err = sender.SetLevel(levelInfo); err != nil {
+			return nil, errors.Wrap(err, "problem setting level")
+		}
+		if err = sender.SetErrorHandler(send.ErrorHandlerFromSender(fallback)); err != nil {
 			return nil, errors.Wrap(err, "problem setting error handler")
 		}
 	}
@@ -327,64 +358,66 @@ func (s *Settings) GetSender() (send.Sender, error) {
 	if endpoint, ok := s.Credentials["sumologic"]; ok {
 		sender, err = send.NewSumo("", endpoint)
 		if err == nil {
-			err = sender.SetErrorHandler(send.ErrorHandlerFromSender(fallback))
-			if err != nil {
+			if err = sender.SetLevel(levelInfo); err != nil {
+				return nil, errors.Wrap(err, "problem setting level")
+			}
+			if err = sender.SetErrorHandler(send.ErrorHandlerFromSender(fallback)); err != nil {
 				return nil, errors.Wrap(err, "problem setting error handler")
 			}
 			senders = append(senders,
 				send.NewBufferedSender(sender,
-					time.Duration(s.LogBuffering.DurationSeconds)*time.Second,
-					s.LogBuffering.BufferCount))
+					time.Duration(s.LoggerConfig.Buffer.DurationSeconds)*time.Second,
+					s.LoggerConfig.Buffer.Count))
 		}
 	}
 
 	if s.Splunk.Populated() {
 		sender, err = send.NewSplunkLogger("", s.Splunk, grip.GetSender().Level())
 		if err == nil {
-			err = sender.SetErrorHandler(send.ErrorHandlerFromSender(fallback))
-			if err != nil {
+			if err = sender.SetLevel(levelInfo); err != nil {
+				return nil, errors.Wrap(err, "problem setting level")
+			}
+			if err = sender.SetErrorHandler(send.ErrorHandlerFromSender(fallback)); err != nil {
 				return nil, errors.Wrap(err, "problem setting error handler")
 			}
 			senders = append(senders,
 				send.NewBufferedSender(sender,
-					time.Duration(s.LogBuffering.DurationSeconds)*time.Second,
-					s.LogBuffering.BufferCount))
+					time.Duration(s.LoggerConfig.Buffer.DurationSeconds)*time.Second,
+					s.LoggerConfig.Buffer.Count))
 		}
+	}
+
+	if s.Slack.Token != "" {
+		sender, err = send.NewSlackLogger(s.Slack.Options, s.Slack.Token,
+			send.LevelInfo{Default: level.Critical, Threshold: level.FromString(s.Slack.Level)})
+		if err == nil {
+			if err = sender.SetErrorHandler(send.ErrorHandlerFromSender(fallback)); err != nil {
+				return nil, errors.Wrap(err, "problem setting error handler")
+			}
+
+			senders = append(senders, logger.MakeQueueSender(env.LocalQueue(), sender))
+		}
+		grip.Warning(errors.Wrap(err, "problem setting up slack alert logger"))
 	}
 
 	return send.NewConfiguredMultiSender(senders...), nil
 }
 
-// SystemInfoCollector is meant to run in a goroutine and log
-// aggregate system resource utilization (cpu, memory, network, i/o)
-// every 15 seconds. The information is logged to process' default
-// grip logger.
-//
-// In general, the collector should run in the background of the API
-// server and the UI server.
-func SystemInfoCollector(ctx context.Context) {
-	const sysInfoLoggingInterval = 15 * time.Second
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			grip.Info("system logging operation canceled")
-			return
-		case <-timer.C:
-			grip.Info(message.CollectSystemInfo())
-			grip.Info(message.CollectGoStats())
-			timer.Reset(sysInfoLoggingInterval)
-		}
-	}
+// SessionFactory creates a usable SessionFactory from
+// the Evergreen settings.
+func (settings *Settings) SessionFactory() *legacyDB.SessionFactory {
+	safety := mgo.Safe{}
+	safety.W = settings.Database.WriteConcernSettings.W
+	safety.WMode = settings.Database.WriteConcernSettings.WMode
+	safety.WTimeout = settings.Database.WriteConcernSettings.WTimeout
+	safety.FSync = settings.Database.WriteConcernSettings.FSync
+	safety.J = settings.Database.WriteConcernSettings.J
+	return legacyDB.NewSessionFactory(settings.Database.Url, settings.Database.DB, settings.Database.SSL, safety, defaultMgoDialTimeout)
 }
 
 // ConfigValidator is a type of function that checks the settings
 // struct for any errors or missing required fields.
 type configValidator func(settings *Settings) error
-
-const defaultLogBufferingDuration = 20
 
 // ConfigValidationRules is the set of all ConfigValidator functions.
 var configValidationRules = []configValidator{
@@ -396,15 +429,96 @@ var configValidationRules = []configValidator{
 	},
 
 	func(settings *Settings) error {
-		if settings.LogBuffering.DurationSeconds == 0 {
-			settings.LogBuffering.DurationSeconds = defaultLogBufferingDuration
+		if settings.Amboy.Name == "" {
+			settings.Amboy.Name = defaultAmboyQueueName
 		}
+
+		if settings.Amboy.DB == "" {
+			settings.Amboy.DB = defaultAmboyDBName
+		}
+
+		if settings.Amboy.PoolSizeLocal == 0 {
+			settings.Amboy.PoolSizeLocal = defaultAmboyPoolSize
+		}
+
+		if settings.Amboy.PoolSizeRemote == 0 {
+			settings.Amboy.PoolSizeRemote = defaultAmboyPoolSize
+		}
+
+		if settings.Amboy.LocalStorage == 0 {
+			settings.Amboy.LocalStorage = defaultAmboyLocalStorageSize
+		}
+
+		return nil
+	},
+
+	func(settings *Settings) error {
+		if settings.LoggerConfig.Buffer.DurationSeconds == 0 {
+			settings.LoggerConfig.Buffer.DurationSeconds = defaultLogBufferingDuration
+		}
+
+		if settings.LoggerConfig.DefaultLevel == "" {
+			settings.LoggerConfig.DefaultLevel = "info"
+		}
+
+		if settings.LoggerConfig.ThresholdLevel == "" {
+			settings.LoggerConfig.ThresholdLevel = "debug"
+		}
+
+		info := settings.LoggerConfig.Info()
+		if !info.Valid() {
+			return errors.Errorf("logging level configuration is not valid [%+v]", info)
+		}
+
+		return nil
+	},
+
+	func(settings *Settings) error {
+		if settings.Slack.Options == nil {
+			settings.Slack.Options = &send.SlackOptions{}
+		}
+
+		if settings.Slack.Token != "" {
+			if settings.Slack.Options.Channel == "" {
+				settings.Slack.Options.Channel = "#evergreen-ops-alerts"
+			}
+
+			if settings.Slack.Options.Name == "" {
+				settings.Slack.Options.Name = "evergreen"
+			}
+
+			if err := settings.Slack.Options.Validate(); err != nil {
+				return errors.Wrap(err, "with a non-empty token, you must specify a valid slack configuration")
+			}
+
+			if !level.IsValidPriority(level.FromString(settings.Slack.Level)) {
+				return errors.Errorf("%s is not a valid priority", settings.Slack.Level)
+			}
+		}
+
 		return nil
 	},
 
 	func(settings *Settings) error {
 		if settings.ClientBinariesDir == "" {
 			settings.ClientBinariesDir = ClientDirectory
+		}
+		return nil
+	},
+
+	func(settings *Settings) error {
+		finders := []string{"legacy", "alternate", "parallel", "pipeline"}
+
+		if settings.Scheduler.TaskFinder == "" {
+			// default to alternate
+			settings.Scheduler.TaskFinder = finders[0]
+			return nil
+		}
+
+		if !sliceContains(finders, settings.Scheduler.TaskFinder) {
+			return errors.Errorf("supported finders are %s; %s is not supported",
+				finders, settings.Scheduler.TaskFinder)
+
 		}
 		return nil
 	},
@@ -493,4 +607,24 @@ var configValidationRules = []configValidator{
 		}
 		return nil
 	},
+
+	func(settings *Settings) error {
+		if settings.Ui.CsrfKey != "" && len(settings.Ui.CsrfKey) != 32 {
+			return errors.New("CSRF key must be 32 characters long")
+		}
+		return nil
+	},
+}
+
+func sliceContains(slice []string, elem string) bool {
+	if slice == nil {
+		return false
+	}
+	for _, i := range slice {
+		if i == elem {
+			return true
+		}
+	}
+
+	return false
 }

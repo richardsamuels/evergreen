@@ -1,6 +1,7 @@
 package digitalocean
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"math/rand"
@@ -10,11 +11,12 @@ import (
 	digo "github.com/dynport/gocloud/digitalocean"
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/cloud"
-	"github.com/evergreen-ci/evergreen/db/bsonutil"
 	"github.com/evergreen-ci/evergreen/hostutil"
 	"github.com/evergreen-ci/evergreen/model/distro"
+	"github.com/evergreen-ci/evergreen/model/event"
 	"github.com/evergreen-ci/evergreen/model/host"
 	"github.com/mitchellh/mapstructure"
+	"github.com/mongodb/anser/bsonutil"
 	"github.com/mongodb/grip"
 	"github.com/pkg/errors"
 )
@@ -121,6 +123,8 @@ func (digoMgr *DigitalOceanManager) SpawnHost(h *host.Host) (*host.Host, error) 
 	// the document is updated later in hostinit, rather than here
 	h.Id = fmt.Sprintf("%v", newDroplet.Id)
 	h.Host = newDroplet.IpAddress
+	event.LogHostStarted(h.Id)
+
 	return h, nil
 
 }
@@ -232,7 +236,7 @@ func (digoMgr *DigitalOceanManager) IsSSHReachable(host *host.Host, keyPath stri
 		return false, errors.WithStack(err)
 	}
 
-	ok, err := hostutil.CheckSSHResponse(host, sshOpts)
+	ok, err := hostutil.CheckSSHResponse(context.TODO(), host, sshOpts)
 	return ok, errors.WithStack(err)
 }
 

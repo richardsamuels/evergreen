@@ -1,7 +1,9 @@
 package driver
 
 import (
+	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"sync"
 	"time"
@@ -9,9 +11,9 @@ import (
 	"github.com/mongodb/amboy"
 	"github.com/mongodb/amboy/registry"
 	"github.com/mongodb/grip"
+	"github.com/mongodb/grip/message"
 	"github.com/pkg/errors"
 	uuid "github.com/satori/go.uuid"
-	"golang.org/x/net/context"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
 )
@@ -140,6 +142,7 @@ func (d *MongoDB) setupDB() error {
 	} else {
 		catcher.Add(jobs.EnsureIndexKey("status.completed", "status.in_prog"))
 	}
+	catcher.Add(jobs.EnsureIndexKey("status.mod_ts"))
 
 	return errors.Wrap(catcher.Resolve(), "problem building indexes")
 }
@@ -197,15 +200,35 @@ func (d *MongoDB) getAtomicQuery(jobName string, stat amboy.JobStatusInfo) bson.
 	}
 }
 
-// Save takes a job object and updates that job in the persistence
-// layer. Replaces or updates an existing job with the same ID
-func (d *MongoDB) Save(j amboy.Job) error {
-	name := j.ID()
+// Put inserts the job into the collection, returning an error when that job already exists.
+func (d *MongoDB) Put(j amboy.Job) error {
 	job, err := registry.MakeJobInterchange(j)
 	if err != nil {
-		return errors.Wrap(err, "problem converting error to interchange format")
+		return errors.Wrap(err, "problem converting job to interchange format")
 	}
 
+	name := j.ID()
+	session, jobs := d.getJobsCollection()
+	defer session.Close()
+
+	if err = jobs.Insert(job); err != nil {
+		return errors.Wrapf(err, "problem saving new job %s", name)
+	}
+
+	grip.Debugf("saved job '%s'", name)
+
+	return nil
+}
+
+// Save takes a job object and updates that job in the persistence
+// layer. Replaces or updates an existing job with the same ID.
+func (d *MongoDB) Save(j amboy.Job) error {
+	job, err := registry.MakeJobInterchange(j)
+	if err != nil {
+		return errors.Wrap(err, "problem converting job to interchange format")
+	}
+
+	name := j.ID()
 	session, jobs := d.getJobsCollection()
 	defer session.Close()
 
@@ -247,8 +270,8 @@ func (d *MongoDB) Jobs() <-chan amboy.Job {
 		session, jobs := d.getJobsCollection()
 		defer session.Close()
 
-		results := jobs.Find(nil).Iter()
-		defer grip.CatchError(results.Close())
+		results := jobs.Find(nil).Sort("-status.mod_ts").Iter()
+		defer results.Close()
 		j := &registry.JobInterchange{}
 		for results.Next(j) {
 			job, err := registry.ConvertToJob(j)
@@ -263,14 +286,42 @@ func (d *MongoDB) Jobs() <-chan amboy.Job {
 	return output
 }
 
+// JobStats returns job status documents for all jobs in the storage layer.
+//
+// This implementation returns documents in reverse modification time.
+func (d *MongoDB) JobStats(ctx context.Context) <-chan amboy.JobStatusInfo {
+	output := make(chan amboy.JobStatusInfo)
+	go func() {
+		defer close(output)
+		session, jobs := d.getJobsCollection()
+		defer session.Close()
+
+		results := jobs.Find(nil).Select(bson.M{
+			"_id":    1,
+			"status": 1,
+		}).Sort("-status.mod_ts").Iter()
+		defer results.Close()
+
+		j := &registry.JobInterchange{}
+		for results.Next(j) {
+			if ctx.Err() != nil {
+				return
+			}
+
+			j.Status.ID = j.Name
+			output <- j.Status
+		}
+	}()
+	return output
+}
+
 // Next returns one job, not marked complete from the database.
-func (d *MongoDB) Next() amboy.Job {
+func (d *MongoDB) Next(ctx context.Context) amboy.Job {
 	session, jobs := d.getJobsCollection()
 	if session == nil || jobs == nil {
 		return nil
 	}
 	defer session.Close()
-
 	j := &registry.JobInterchange{}
 
 	query := jobs.Find(bson.M{"status.completed": false, "status.in_prog": false})
@@ -278,20 +329,46 @@ func (d *MongoDB) Next() amboy.Job {
 		query = query.Sort("-priority")
 	}
 
-	err := query.One(j)
-	if err != nil {
-		grip.DebugWhenln(err.Error() != "not found",
-			"could not find a job ready for processing:", err.Error())
-		return nil
-	}
+	timer := time.NewTimer(0)
+	defer timer.Stop()
 
-	job, err := registry.ConvertToJob(j)
-	if err != nil {
-		grip.Errorf("problem converting from MongoDB to job object: %+v", err.Error())
-		return nil
-	}
+	var misses int64
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-timer.C:
+			err := query.One(j)
+			if err != nil {
+				if misses < 30 {
+					misses++
+				}
 
-	return job
+				if err == mgo.ErrNotFound {
+					timer.Reset(time.Duration(misses * rand.Int63n(int64(time.Second))))
+					continue
+				}
+				grip.Warning(message.Fields{
+					"message": "problem retreiving jobs from MongoDB",
+					"error":   err.Error(),
+				})
+				return nil
+			}
+
+			job, err := registry.ConvertToJob(j)
+			if err != nil {
+				grip.Warning(message.Fields{
+					"message": "problem converting job object from mongodb",
+					"error":   err.Error(),
+				})
+				timer.Reset(time.Duration(misses * rand.Int63n(int64(time.Second))))
+				continue
+			}
+
+			return job
+		}
+
+	}
 }
 
 // Stats returns a Stats object that contains information about the

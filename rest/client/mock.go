@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"io/ioutil"
 	"path/filepath"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"github.com/evergreen-ci/evergreen/apimodels"
 	"github.com/evergreen-ci/evergreen/cloud/providers/mock"
 	serviceModel "github.com/evergreen-ci/evergreen/model"
+	"github.com/evergreen-ci/evergreen/model/admin"
 	"github.com/evergreen-ci/evergreen/model/artifact"
 	"github.com/evergreen-ci/evergreen/model/distro"
 	"github.com/evergreen-ci/evergreen/model/manifest"
@@ -20,7 +22,6 @@ import (
 	"github.com/evergreen-ci/evergreen/testutil"
 	"github.com/mongodb/grip/message"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 // Mock mocks EvergreenREST for testing.
@@ -49,6 +50,7 @@ type Mock struct {
 	TimeoutFilename        string
 	HeartbeatShouldAbort   bool
 	HeartbeatShouldErr     bool
+	TaskExecution          int
 
 	// metrics collection
 	ProcInfo map[string][]*message.ProcessInfo
@@ -139,6 +141,7 @@ func (c *Mock) GetTask(ctx context.Context, td TaskData) (*task.Task, error) {
 		Secret:       "mock_task_secret",
 		BuildVariant: "mock_build_variant",
 		DisplayName:  "build",
+		Execution:    c.TaskExecution,
 	}, nil
 }
 
@@ -169,8 +172,14 @@ func (c *Mock) GetVersion(ctx context.Context, td TaskData) (*version.Version, e
 		data, err = ioutil.ReadFile(filepath.Join(testutil.GetDirectoryOfFile(), "testdata", "shellexec.yaml"))
 	case "s3copy":
 		data, err = ioutil.ReadFile(filepath.Join(testutil.GetDirectoryOfFile(), "testdata", "s3copy.yaml"))
-	case "timeout":
-		data, err = ioutil.ReadFile(filepath.Join(testutil.GetDirectoryOfFile(), "testdata", "timeout.yaml"))
+	case "exec_timeout_project":
+		data, err = ioutil.ReadFile(filepath.Join(testutil.GetDirectoryOfFile(), "testdata", "exec_timeout_project.yaml"))
+	case "exec_timeout_task":
+		data, err = ioutil.ReadFile(filepath.Join(testutil.GetDirectoryOfFile(), "testdata", "exec_timeout_task.yaml"))
+	case "idle_timeout_func":
+		data, err = ioutil.ReadFile(filepath.Join(testutil.GetDirectoryOfFile(), "testdata", "idle_timeout_func.yaml"))
+	case "idle_timeout_task":
+		data, err = ioutil.ReadFile(filepath.Join(testutil.GetDirectoryOfFile(), "testdata", "idle_timeout_task.yaml"))
 	}
 	if err != nil {
 		panic(err)
@@ -320,11 +329,11 @@ func (c *Mock) GetHosts(ctx context.Context, f func([]*model.APIHost) error) err
 }
 
 // nolint
-func (c *Mock) SetBannerMessage(ctx context.Context, m string) error                  { return nil }
-func (c *Mock) GetBannerMessage(ctx context.Context) (string, error)                  { return "", nil }
-func (c *Mock) SetServiceFlags(ctx context.Context, f *model.APIServiceFlags) error   { return nil }
-func (c *Mock) GetServiceFlags(ctx context.Context) (*model.APIServiceFlags, error)   { return nil, nil }
-func (c *Mock) RestartRecentTasks(ctx context.Context, starAt, endAt time.Time) error { return nil }
+func (c *Mock) SetBannerMessage(ctx context.Context, m string, t admin.BannerTheme) error { return nil }
+func (c *Mock) GetBannerMessage(ctx context.Context) (string, error)                      { return "", nil }
+func (c *Mock) SetServiceFlags(ctx context.Context, f *model.APIServiceFlags) error       { return nil }
+func (c *Mock) GetServiceFlags(ctx context.Context) (*model.APIServiceFlags, error)       { return nil, nil }
+func (c *Mock) RestartRecentTasks(ctx context.Context, starAt, endAt time.Time) error     { return nil }
 
 // SendResults posts a set of test results for the communicator's task.
 // If results are empty or nil, this operation is a noop.
@@ -399,4 +408,39 @@ func (c *Mock) GetSystemInfoLength() int {
 	length := len(c.SysInfo)
 	c.mu.RUnlock()
 	return length
+}
+
+func (c *Mock) GetDistrosList(ctx context.Context) ([]model.APIDistro, error) {
+	mockDistros := []model.APIDistro{
+		{
+			Name:             model.APIString("archlinux-build"),
+			UserSpawnAllowed: true,
+		},
+		{
+			Name:             model.APIString("baas-linux"),
+			UserSpawnAllowed: false,
+		},
+	}
+	return mockDistros, nil
+}
+
+func (c *Mock) GetCurrentUsersKeys(ctx context.Context) ([]model.APIPubKey, error) {
+	return []model.APIPubKey{
+		{
+			Name: "key0",
+			Key:  "ssh-fake 12345",
+		},
+		{
+			Name: "key1",
+			Key:  "ssh-fake 67890",
+		},
+	}, nil
+}
+
+func (c *Mock) AddPublicKey(ctx context.Context, keyName, keyValue string) error {
+	return errors.New("(c *Mock) AddPublicKey not implemented")
+}
+
+func (c *Mock) DeletePublicKey(ctx context.Context, keyName string) error {
+	return errors.New("(c *Mock) DeletePublicKey not implemented")
 }

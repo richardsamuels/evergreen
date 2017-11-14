@@ -22,6 +22,12 @@ mciServices.rest.factory('mciBaseRestService', ['$http', function($http) {
 
         config.method = method;
         config.url = [baseUrl, resource].concat(idents).join('/');
+        var csrfElem = document.getElementsByName("gorilla.csrf.Token");
+        if (csrfElem && csrfElem.length > 0) {
+          config.headers = {
+             'X-CSRF-Token': csrfElem[0].value
+          };
+        };
 
         $http(config).then(callbacks.success || function() {}, callbacks.error || function() {});
     };
@@ -333,12 +339,14 @@ mciServices.rest.factory('mciAdminRestService', ['mciBaseRestService', function(
       baseSvc.postResource(resource, [], config, callbacks);
     }
 
-    service.restartTasks = function(from, to, isDryRun, callbacks) {
+    service.restartTasks = function(from, to, isDryRun, restartRed, restartPurple, callbacks) {
       var config = {}
       config.data = {
         start_time: from,
         end_time: to,
-        dry_run: isDryRun
+        dry_run: isDryRun,
+        only_red: restartRed,
+        only_purple: restartPurple
       };
       baseSvc.postResource(resource + "/restart", [], config, callbacks);
     }

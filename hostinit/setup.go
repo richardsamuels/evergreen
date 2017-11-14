@@ -2,6 +2,7 @@ package hostinit
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"github.com/evergreen-ci/evergreen/cloud/providers"
 	"github.com/evergreen-ci/evergreen/hostutil"
 	"github.com/evergreen-ci/evergreen/model"
+	"github.com/evergreen-ci/evergreen/model/distro"
 	"github.com/evergreen-ci/evergreen/model/event"
 	"github.com/evergreen-ci/evergreen/model/host"
 	"github.com/evergreen-ci/evergreen/model/user"
@@ -28,14 +30,11 @@ import (
 	"github.com/mongodb/grip"
 	"github.com/mongodb/grip/message"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 	"gopkg.in/mgo.v2"
 )
 
 const (
-	SCPTimeout         = time.Minute
-	setupScriptName    = "setup.sh"
-	teardownScriptName = "teardown.sh"
+	SCPTimeout = time.Minute
 )
 
 // Error indicating another hostinit got to the setup first.
@@ -68,21 +67,24 @@ func (init *HostInit) startHosts(ctx context.Context) error {
 		startQueue[i] = hostsToStart[r]
 	}
 
-	for idx, h := range startQueue {
+	var started int
+	for _, h := range startQueue {
 		if ctx.Err() != nil {
 			return errors.New("hostinit run canceled")
 		}
 
-		if idx >= 8 {
-			grip.Warning(message.Fields{
-				"message":           "pausing host starting",
-				"GUID":              init.GUID,
-				"runner":            "hostinit",
-				"num_started":       idx + 1,
-				"num_pending_hosts": len(hostsToStart),
-			})
-			return nil
+		if h.UserHost {
+			// pass:
+			//    always start spawn hosts asap
+		} else if started > 4 {
+			// throttle hosts, so that we're starting very
+			// few hosts on every pass. Hostinit runs very
+			// frequently, lets not start too many all at
+			// once.
+
+			continue
 		}
+		started++
 
 		hostStartTime := time.Now()
 		grip.Info(message.Fields{
@@ -107,6 +109,7 @@ func (init *HostInit) startHosts(ctx context.Context) error {
 		}
 
 		h.Status = evergreen.HostStarting
+		h.StartTime = time.Now()
 
 		_, err = h.Upsert()
 		if err != nil {
@@ -123,10 +126,11 @@ func (init *HostInit) startHosts(ctx context.Context) error {
 	}
 
 	grip.Info(message.Fields{
-		"GUID":    init.GUID,
-		"runner":  RunnerName,
-		"method":  "startHosts",
-		"runtime": time.Since(startTime),
+		"GUID":      init.GUID,
+		"runner":    RunnerName,
+		"method":    "startHosts",
+		"num_hosts": started,
+		"runtime":   time.Since(startTime),
 	})
 
 	return nil
@@ -134,8 +138,6 @@ func (init *HostInit) startHosts(ctx context.Context) error {
 
 // setupReadyHosts runs the distro setup script of all hosts that are up and reachable.
 func (init *HostInit) setupReadyHosts(ctx context.Context) error {
-	startTime := time.Now()
-
 	// set SSH timeout duration
 	if timeoutSecs := init.Settings.HostInit.SSHTimeoutSeconds; timeoutSecs <= 0 {
 		grip.Warningf("SSH timeout set to %vs (<= 0s) using %vs instead", timeoutSecs, SSHTimeoutSeconds)
@@ -164,7 +166,12 @@ func (init *HostInit) setupReadyHosts(ctx context.Context) error {
 	}
 	close(hosts)
 
-	for i := 0; i < 8; i++ {
+	numThreads := 16
+	if len(uninitializedHosts) < 16 {
+		numThreads = len(uninitializedHosts)
+	}
+
+	for i := 0; i < numThreads; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -186,22 +193,20 @@ func (init *HostInit) setupReadyHosts(ctx context.Context) error {
 					})
 
 					// check whether or not the host is ready for its setup script to be run
-					ready, err := init.IsHostReady(&h)
-					if err != nil {
-						err = errors.Wrapf(err, "problem checking host %s for readiness", h.Id)
-						catcher.Add(err)
-						grip.Error(err.Error())
-						continue
-					}
-
 					// if the host isn't ready (for instance, it might not be up yet), skip it
-					if !ready {
-						grip.Debug(message.Fields{
+					if ready, err := init.IsHostReady(&h); !ready {
+						m := message.Fields{
 							"GUID":    init.GUID,
 							"message": "host not ready for setup",
 							"hostid":  h.Id,
 							"DNS":     h.Host,
-						})
+						}
+
+						if err != nil {
+							m["error"] = err.Error()
+						}
+
+						grip.Info(m)
 						continue
 					}
 
@@ -247,13 +252,6 @@ func (init *HostInit) setupReadyHosts(ctx context.Context) error {
 
 	// let all setup routines finish
 	wg.Wait()
-
-	grip.Info(message.Fields{
-		"GUID":    init.GUID,
-		"runner":  RunnerName,
-		"method":  "setupReadyHosts",
-		"runtime": time.Since(startTime),
-	})
 
 	return catcher.Resolve()
 }
@@ -344,14 +342,9 @@ func (init *HostInit) setupHost(ctx context.Context, targetHost *host.Host) (str
 	if err = targetHost.SetInitializing(); err != nil {
 		if err == mgo.ErrNotFound {
 			return "", ErrHostAlreadyInitializing
-		} else {
-			return "", errors.Wrapf(err, "database error")
 		}
+		return "", errors.Wrapf(err, "database error")
 	}
-
-	/* TESTING ONLY
-	setupDebugSSHTunnel(path_to_ssh_key, targetHost.User, targetHost.Host)
-	*/
 
 	// run the function scheduled for when the host is up
 	err = cloudMgr.OnUp(targetHost)
@@ -359,14 +352,6 @@ func (init *HostInit) setupHost(ctx context.Context, targetHost *host.Host) (str
 		err = errors.Wrapf(err, "OnUp callback failed for host %s", targetHost.Id)
 		grip.Error(err)
 		return "", err
-	}
-	cloudHost, err := providers.GetCloudHost(targetHost, init.Settings)
-	if err != nil {
-		return "", errors.Wrapf(err, "failed to get cloud host for %s", targetHost.Id)
-	}
-	sshOptions, err := cloudHost.GetSSHOptions()
-	if err != nil {
-		return "", errors.Wrapf(err, "error getting ssh options for host %s", targetHost.Id)
 	}
 
 	// get expansions mapping using settings
@@ -379,23 +364,18 @@ func (init *HostInit) setupHost(ctx context.Context, targetHost *host.Host) (str
 	}
 
 	if targetHost.Distro.Setup != "" {
-		err = init.copyScript(ctx, targetHost, setupScriptName, targetHost.Distro.Setup)
+		err = init.copyScript(ctx, targetHost, evergreen.SetupScriptName, targetHost.Distro.Setup)
 		if err != nil {
 			return "", errors.Errorf("error copying script %v to host %v: %v",
-				setupScriptName, targetHost.Id, err)
-		}
-		var logs string
-		logs, err = hostutil.RunRemoteScript(ctx, targetHost, setupScriptName, sshOptions)
-		if err != nil {
-			return logs, errors.Errorf("error running setup script over ssh: %v", err)
+				evergreen.SetupScriptName, targetHost.Id, err)
 		}
 	}
 
 	if targetHost.Distro.Teardown != "" {
-		err = init.copyScript(ctx, targetHost, teardownScriptName, targetHost.Distro.Teardown)
+		err = init.copyScript(ctx, targetHost, evergreen.TeardownScriptName, targetHost.Distro.Teardown)
 		if err != nil {
 			return "", errors.Wrapf(err, "error copying script %v to host %v",
-				teardownScriptName, targetHost.Id)
+				evergreen.TeardownScriptName, targetHost.Id)
 		}
 	}
 
@@ -421,6 +401,9 @@ func (init *HostInit) copyScript(ctx context.Context, target *host.Host, name, s
 	if err != nil {
 		return errors.Wrap(err, "error creating temporary script file")
 	}
+	if err := os.Chmod(file.Name(), 0700); err != nil {
+		return errors.Wrap(err, "error setting file permissions")
+	}
 	defer func() {
 		grip.Error(file.Close())
 		grip.Error(os.Remove(file.Name()))
@@ -443,52 +426,18 @@ func (init *HostInit) copyScript(ctx context.Context, target *host.Host, name, s
 		return errors.Wrapf(err, "error getting ssh options for host %v", target.Id)
 	}
 
-	cappedMakeDirectoryLog := util.CappedWriter{
-		Buffer:   &bytes.Buffer{},
-		MaxBytes: 1024 * 1024, // 1MB
-	}
-
-	makeDirectoryCmd := &subprocess.RemoteCommand{
-		Id:             fmt.Sprintf("create-workdir-%d", rand.Int()),
-		CmdString:      fmt.Sprintf("mkdir -m 777 -p %s", target.Distro.WorkDir),
-		Stdout:         &cappedMakeDirectoryLog,
-		Stderr:         &cappedMakeDirectoryLog,
-		RemoteHostName: hostInfo.Hostname,
-		User:           user,
-		Options:        append([]string{"-p", hostInfo.Port}, sshOptions...),
-	}
-	if target.Distro.SetupAsSudo {
-		makeDirectoryCmd.CmdString = fmt.Sprintf("sudo %s", makeDirectoryCmd.CmdString)
-	}
-
-	grip.Infof("Directories command: '%#v'", makeDirectoryCmd)
-
-	// run the make shell command with a timeout
-	var cancel context.CancelFunc
-	ctx, cancel = context.WithTimeout(ctx, SCPTimeout)
-	defer cancel()
-
-	if err = makeDirectoryCmd.Run(ctx); err != nil {
-		if err == util.ErrTimedOut {
-			grip.Notice(makeDirectoryCmd.Stop())
-			return errors.Errorf("creating remote directories timed out: %s",
-				cappedMakeDirectoryLog.String())
-		}
-		return errors.Wrapf(err, "error creating directories on remote machine: %s",
-			cappedMakeDirectoryLog.String())
-	}
-
 	var scpCmdStderr bytes.Buffer
 	scpCmd := &subprocess.ScpCommand{
 		Source:         file.Name(),
-		Dest:           filepath.Join(target.Distro.WorkDir, name),
+		Dest:           filepath.Join("~", name),
 		Stdout:         &scpCmdStderr,
 		Stderr:         &scpCmdStderr,
 		RemoteHostName: hostInfo.Hostname,
 		User:           user,
 		Options:        append([]string{"-P", hostInfo.Port}, sshOptions...),
 	}
-	// run the command to scp the agent with a timeout
+	// run the command to scp the script with a timeout
+	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, SCPTimeout)
 	defer cancel()
 	if err = scpCmd.Run(ctx); err != nil {
@@ -537,21 +486,46 @@ func (init *HostInit) ProvisionHost(ctx context.Context, h *host.Host) error {
 		return errors.Wrapf(err, "error initializing host %s", h.Id)
 	}
 
-	grip.Infof("Setup complete for host %s", h.Id)
-
-	if h.ProvisionOptions != nil &&
-		h.ProvisionOptions.LoadCLI &&
-		h.ProvisionOptions.OwnerId != "" {
+	// If this is a spawn host
+	if h.ProvisionOptions != nil && h.ProvisionOptions.LoadCLI {
 		grip.Infof("Uploading client binary to host %s", h.Id)
 		lcr, err := init.LoadClient(ctx, h)
 		if err != nil {
+			err = errors.Wrapf(err, "Failed to load client binary onto host %s: %+v", h.Id, err)
 			grip.Errorf("Failed to load client binary onto host %s: %+v", h.Id, err)
-		} else if err == nil && len(h.ProvisionOptions.TaskId) > 0 {
+			return err
+		}
+
+		cloudHost, err := providers.GetCloudHost(h, init.Settings)
+		if err != nil {
+			return errors.Wrapf(err, "Failed to get cloud host for %s", h.Id)
+		}
+		sshOptions, err := cloudHost.GetSSHOptions()
+		if err != nil {
+			return errors.Wrapf(err, "Error getting ssh options for host %s", h.Id)
+		}
+
+		d, err := distro.FindOne(distro.ById(h.Distro.Id))
+		if err != nil {
+			return errors.Wrapf(err, "error finding distro %s", h.Distro.Id)
+		}
+		h.Distro = *d
+
+		grip.Infof("Running setup script for spawn host %s", h.Id)
+		// run the setup script with the agent
+		if err := hostutil.RunSSHCommand("setup", hostutil.SetupCommand(h), sshOptions, *h); err != nil {
+			return errors.Wrap(err, "error running setup script on remote host")
+		}
+
+		if h.ProvisionOptions.OwnerId != "" &&
+			len(h.ProvisionOptions.TaskId) > 0 {
 			grip.Infof("Fetching data for task %s onto host %s", h.ProvisionOptions.TaskId, h.Id)
 			err = init.fetchRemoteTaskData(ctx, h.ProvisionOptions.TaskId, lcr.BinaryPath, lcr.ConfigPath, h)
 			grip.ErrorWhenf(err != nil, "Failed to fetch data onto host %s: %v", h.Id, err)
 		}
 	}
+
+	grip.Infof("Setup complete for host %s", h.Id)
 
 	// the setup was successful. update the host accordingly in the database
 	if err := h.MarkAsProvisioned(); err != nil {
@@ -602,12 +576,6 @@ type LoadClientResult struct {
 // If successful, returns an instance of LoadClientResult which contains the paths where the
 // binary and config file were written to.
 func (init *HostInit) LoadClient(ctx context.Context, target *host.Host) (*LoadClientResult, error) {
-	// Make sure we have the binary we want to upload - if it hasn't been built for the given
-	// architecture, fail early
-	cliBinaryPath, err := LocateCLIBinary(init.Settings, target.Distro.Arch)
-	if err != nil {
-		return nil, errors.Wrapf(err, "couldn't locate CLI binary for upload")
-	}
 	if target.ProvisionOptions == nil {
 		return nil, errors.New("ProvisionOptions is nil")
 	}
@@ -654,7 +622,7 @@ func (init *HostInit) LoadClient(ctx context.Context, target *host.Host) (*LoadC
 		Options:        append([]string{"-p", hostSSHInfo.Port}, sshOptions...),
 	}
 
-	scpOut := &util.CappedWriter{&bytes.Buffer{}, 1024 * 1024}
+	curlOut := &util.CappedWriter{&bytes.Buffer{}, 1024 * 1024}
 
 	// run the make shell command with a timeout
 	var cancel context.CancelFunc
@@ -666,21 +634,20 @@ func (init *HostInit) LoadClient(ctx context.Context, target *host.Host) (*LoadC
 	}
 
 	// place the binary into the directory
-	scpSetupCmd := &subprocess.ScpCommand{
-		Source:         cliBinaryPath,
-		Dest:           fmt.Sprintf("~/%s/evergreen", targetDir),
-		Stdout:         scpOut,
-		Stderr:         scpOut,
+	curlSetupCmd := &subprocess.RemoteCommand{
+		CmdString:      hostutil.CurlCommand(init.Settings.Ui.Url, target),
+		Stdout:         curlOut,
+		Stderr:         curlOut,
 		RemoteHostName: hostSSHInfo.Hostname,
 		User:           target.User,
-		Options:        append([]string{"-P", hostSSHInfo.Port}, sshOptions...),
+		Options:        append([]string{"-p", hostSSHInfo.Port}, sshOptions...),
 	}
 
-	// run the command to scp the setup script with a timeout
+	// run the command to curl the agent
 	ctx, cancel = context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
-	if err = scpSetupCmd.Run(ctx); err != nil {
-		return nil, errors.Wrapf(err, "error running SCP command for cli, %v: '%v'", scpOut.Buffer.String())
+	if err = curlSetupCmd.Run(ctx); err != nil {
+		return nil, errors.Wrapf(err, "error running curl command for cli, %v: '%v'", curlOut.Buffer.String())
 	}
 
 	// 4. Write a settings file for the user that owns the host, and scp it to the directory
@@ -701,6 +668,7 @@ func (init *HostInit) LoadClient(ctx context.Context, target *host.Host) (*LoadC
 	}
 	defer os.Remove(tempFileName)
 
+	scpOut := &util.CappedWriter{&bytes.Buffer{}, 1024 * 1024}
 	scpYmlCommand := &subprocess.ScpCommand{
 		Source:         tempFileName,
 		Dest:           fmt.Sprintf("~/%s/.evergreen.yml", targetDir),
@@ -718,8 +686,8 @@ func (init *HostInit) LoadClient(ctx context.Context, target *host.Host) (*LoadC
 	}
 
 	return &LoadClientResult{
-		BinaryPath: fmt.Sprintf("~/%s/evergreen", targetDir),
-		ConfigPath: fmt.Sprintf("~/%s/.evergreen.yml", targetDir),
+		BinaryPath: filepath.Join("~", "evergreen"),
+		ConfigPath: fmt.Sprintf("%s/.evergreen.yml", targetDir),
 	}, nil
 }
 
@@ -739,17 +707,10 @@ func (init *HostInit) fetchRemoteTaskData(ctx context.Context, taskId, cliPath, 
 	}
 	sshOptions = append(sshOptions, "-o", "UserKnownHostsFile=/dev/null")
 
-	/* TESTING ONLY
-	setupDebugSSHTunnel(path_to_ssh_keys, target.User, hostSSHInfo.Hostname)
-	*/
-
-	// When testing, use this writer to force a copy of the output to be written to standard out so
-	// that remote command failures also show up in server log output.
-	//cmdOutput := io.MultiWriter(&util.CappedWriter{&bytes.Buffer{}, 1024 * 1024}, os.Stdout)
-
 	cmdOutput := &util.CappedWriter{&bytes.Buffer{}, 1024 * 1024}
 	makeShellCmd := &subprocess.RemoteCommand{
-		CmdString:      fmt.Sprintf("%s -c '%s' fetch -t %s --source --artifacts --dir='%s'", cliPath, confPath, taskId, target.Distro.WorkDir),
+		Id:             fmt.Sprintf("fetch-artifacts-%s", taskId),
+		CmdString:      fmt.Sprintf("%s -c %s fetch -t %s --source --artifacts --dir='%s'", cliPath, confPath, taskId, target.Distro.WorkDir),
 		Stdout:         cmdOutput,
 		Stderr:         cmdOutput,
 		RemoteHostName: hostSSHInfo.Hostname,
@@ -761,5 +722,16 @@ func (init *HostInit) fetchRemoteTaskData(ctx context.Context, taskId, cliPath, 
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
-	return errors.WithStack(makeShellCmd.Run(ctx))
+
+	if err := makeShellCmd.Run(ctx); err != nil {
+		grip.Error(message.Fields{
+			"message": fmt.Sprintf("fetch-artifacts-%s", taskId),
+			"host":    hostSSHInfo.Hostname,
+			"cmd":     makeShellCmd.CmdString,
+			"error":   err,
+			"output":  cmdOutput,
+		})
+		return err
+	}
+	return nil
 }

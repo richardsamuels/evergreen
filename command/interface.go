@@ -1,11 +1,12 @@
 package command
 
 import (
+	"context"
 	"sync"
+	"time"
 
 	"github.com/evergreen-ci/evergreen/model"
 	"github.com/evergreen-ci/evergreen/rest/client"
-	"golang.org/x/net/context"
 )
 
 // Command is an interface that defines a command
@@ -33,11 +34,15 @@ type Command interface {
 
 	DisplayName() string
 	SetDisplayName(string)
+
+	IdleTimeout() time.Duration
+	SetIdleTimeout(time.Duration)
 }
 
 // base contains a basic implementation of functionality that is
 // common to all command implementations.
 type base struct {
+	idleTimeout time.Duration
 	typeName    string
 	displayName string
 	mu          sync.RWMutex
@@ -71,4 +76,18 @@ func (b *base) SetDisplayName(n string) {
 	defer b.mu.Unlock()
 
 	b.displayName = n
+}
+
+func (b *base) SetIdleTimeout(d time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.idleTimeout = d
+}
+
+func (b *base) IdleTimeout() time.Duration {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	return b.idleTimeout
 }

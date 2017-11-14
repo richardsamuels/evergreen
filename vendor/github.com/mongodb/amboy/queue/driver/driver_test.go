@@ -1,15 +1,16 @@
 package driver
 
 import (
+	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/mongodb/amboy/job"
+	"github.com/mongodb/grip"
 	"github.com/satori/go.uuid"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"github.com/mongodb/grip"
-	"golang.org/x/net/context"
 )
 
 // All drivers should be able to pass this suite of tests which
@@ -91,6 +92,21 @@ func (s *DriverSuite) TestInitialValues() {
 	s.Equal(0, stats.Pending)
 	s.Equal(0, stats.Blocked)
 	s.Equal(0, stats.Total)
+}
+
+func (s *DriverSuite) TestPutJobDoesNotAllowDuplicateIds() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.NoError(s.driver.Open(ctx))
+
+	j := job.NewShellJob("echo foo", "")
+
+	err := s.driver.Put(j)
+	s.NoError(err)
+
+	for i := 0; i < 10; i++ {
+		s.Error(s.driver.Put(j))
+	}
 }
 
 func (s *DriverSuite) TestSaveJobPersistsJobInDriver() {
@@ -183,17 +199,17 @@ func (s *DriverSuite) TestStatsCallReportsCompletedJobs() {
 }
 
 func (s *DriverSuite) TestNextMethodReturnsJob() {
+	ctx := context.Background()
 	s.Equal(0, s.driver.Stats().Total)
-	s.Nil(s.driver.Next())
 
 	j := job.NewShellJob("echo foo", "")
 
-	s.NoError(s.driver.Save(j))
+	s.NoError(s.driver.Put(j))
 	stats := s.driver.Stats()
 	s.Equal(1, stats.Total)
 	s.Equal(1, stats.Pending)
 
-	nj := s.driver.Next()
+	nj := s.driver.Next(ctx)
 	stats = s.driver.Stats()
 	s.Equal(0, stats.Completed)
 	s.Equal(1, stats.Pending)
@@ -203,14 +219,12 @@ func (s *DriverSuite) TestNextMethodReturnsJob() {
 	if s.NotNil(nj) {
 		s.Equal(j.ID(), nj.ID())
 		s.NoError(s.driver.Lock(j))
-		// won't dispatch the same job more than once.
-		s.Nil(s.driver.Next())
-		s.Nil(s.driver.Next())
-		s.Nil(s.driver.Next())
 	}
 }
 
 func (s *DriverSuite) TestNextMethodSkipsCompletedJos() {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
 	j := job.NewShellJob("echo foo", "")
 	j.MarkComplete()
 
@@ -222,7 +236,7 @@ func (s *DriverSuite) TestNextMethodSkipsCompletedJos() {
 	s.Equal(0, s.driver.Stats().Pending)
 	s.Equal(1, s.driver.Stats().Completed)
 
-	s.Nil(s.driver.Next(), fmt.Sprintf("%T", s.driver))
+	s.Nil(s.driver.Next(ctx), fmt.Sprintf("%T", s.driver))
 }
 
 func (s *DriverSuite) TestJobsMethodReturnsAllJobs() {
@@ -247,4 +261,27 @@ func (s *DriverSuite) TestJobsMethodReturnsAllJobs() {
 	}
 
 	s.Equal(counter, len(mocks))
+}
+
+func (s *DriverSuite) TestStatsMethodReturnsAllJobs() {
+	names := make(map[string]struct{})
+
+	for i := 0; i < 30; i++ {
+		cmd := fmt.Sprintf("echo 'foo: %d'", i)
+		j := job.NewShellJob(cmd, "")
+
+		s.NoError(s.driver.Save(j))
+		names[j.ID()] = struct{}{}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	counter := 0
+	for stat := range s.driver.JobStats(ctx) {
+		_, ok := names[stat.ID]
+		s.True(ok)
+		counter++
+	}
+	s.Equal(len(names), counter)
+	s.Equal(counter, 30)
 }

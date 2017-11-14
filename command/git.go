@@ -1,6 +1,7 @@
 package command
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -16,7 +17,6 @@ import (
 	"github.com/mitchellh/mapstructure"
 	"github.com/mongodb/grip/level"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 // gitFetchProject is a command that fetches source code from git for the project
@@ -303,7 +303,7 @@ func (c *gitFetchProject) applyPatch(ctx context.Context, logger client.LoggerPr
 			}
 
 			// skip the module if this build variant does not use it
-			if !util.SliceContains(conf.BuildVariant.Modules, module.Name) {
+			if !util.StringSliceContains(conf.BuildVariant.Modules, module.Name) {
 				logger.Execution().Infof(
 					"Skipping patch for module %v: the current build variant does not use it",
 					module.Name)

@@ -1,6 +1,7 @@
 package command
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -12,7 +13,6 @@ import (
 	"github.com/mitchellh/mapstructure"
 	"github.com/mongodb/grip/level"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 // shellExec is responsible for running the shell code.
@@ -211,7 +211,9 @@ func (c *shellExec) Execute(ctx context.Context,
 
 			// try and stop the process
 			if err := localCmd.Stop(); err != nil {
-				logger.Execution().Error(errors.Wrap(err, "error while stopping process"))
+				err = errors.Wrap(err, "error while stopping process")
+				logger.Execution().Error(err)
+				return err
 			}
 		}
 

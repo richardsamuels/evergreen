@@ -15,6 +15,7 @@ import (
 	"github.com/evergreen-ci/evergreen/util"
 	"github.com/mitchellh/mapstructure"
 	"github.com/mongodb/grip"
+	"github.com/mongodb/grip/message"
 	"github.com/pkg/errors"
 )
 
@@ -27,6 +28,9 @@ const (
 	// to account for when alternate distros are unable to satisfy the
 	// turnaround requirement as determined by MaxDurationPerDistroHost
 	SharedTasksAllocationProportion = 0.8
+
+	staticDistroRuntimeAlertThreshold  = 7 * 24 * time.Hour
+	dynamicDistroRuntimeAlertThreshold = 24 * time.Hour
 )
 
 // DistroScheduleData contains bookkeeping data that is used by distros to
@@ -178,7 +182,7 @@ func computeScheduledTasksDuration(
 		// it to the total duration of 'shared tasks' for the distro and all
 		// other distros it can be run on
 		distroIds, ok := taskRunDistros[taskQueueItem.Id]
-		if ok && util.SliceContains(distroIds, currentDistroId) {
+		if ok && util.StringSliceContains(distroIds, currentDistroId) {
 			for _, distroId := range distroIds {
 				sharedTasksDuration[distroId] +=
 					taskQueueItem.ExpectedDuration.Seconds()
@@ -223,11 +227,10 @@ func computeRunningTasksDuration(existingDistroHosts []host.Host,
 	for _, runningTaskId := range runningTaskIds {
 		runningTask, ok := runningTasksMap[runningTaskId]
 		if !ok {
-			return runningTasksDuration, errors.Errorf("Unable to find running "+
-				"task with _id %v", runningTaskId)
+			return runningTasksDuration, errors.Errorf(
+				"Unable to find running task with _id %v", runningTaskId)
 		}
-		expectedDuration := model.GetTaskExpectedDuration(runningTask,
-			taskDurations)
+		expectedDuration := model.GetTaskExpectedDuration(runningTask, taskDurations)
 		elapsedTime := time.Since(runningTask.StartTime)
 		if elapsedTime > expectedDuration {
 			// probably an outlier; or an unknown data point
@@ -248,8 +251,7 @@ func computeDurationBasedNumNewHosts(scheduledTasksDuration,
 	maxDurationPerHost time.Duration) (numNewHosts int) {
 
 	// total duration of scheduled and currently running tasks
-	totalDistroTasksDuration := scheduledTasksDuration +
-		runningTasksDuration
+	totalDistroTasksDuration := scheduledTasksDuration + runningTasksDuration
 
 	// number of hosts needed to meet the duration based turnaround requirement
 	numHostsForTurnaroundRequirement := totalDistroTasksDuration /
@@ -259,8 +261,17 @@ func computeDurationBasedNumNewHosts(scheduledTasksDuration,
 	durationBasedNumNewHostsNeeded := numHostsForTurnaroundRequirement -
 		numExistingDistroHosts
 
+	// in the case where we need a fractional host, we should
+	// generally round down, as the allocator has proven a bit
+	// generous; however, we probably ought to spin up a single
+	// host to avoid small queues getting stuck without any running hosts.
+	if numExistingDistroHosts < 1 && durationBasedNumNewHostsNeeded > 0 && durationBasedNumNewHostsNeeded < 1 {
+		numNewHosts = 1
+		return
+	}
+
 	// duration based number of new hosts needed
-	numNewHosts = int(math.Ceil(durationBasedNumNewHostsNeeded))
+	numNewHosts = int(math.Floor(durationBasedNumNewHostsNeeded))
 
 	// return 0 if numNewHosts is less than 0
 	if numNewHosts < 0 {
@@ -466,7 +477,7 @@ func (self *DurationBasedHostAllocator) numNewHostsForDistro(
 		numFreeHosts, durationBasedNumNewHosts, len(taskQueueItems))
 
 	// create an entry for this distro in the scheduling map
-	distroScheduleData[distro.Id] = DistroScheduleData{
+	distroData := DistroScheduleData{
 		nominalNumNewHosts:   numNewHosts,
 		numFreeHosts:         numFreeHosts,
 		poolSize:             distro.PoolSize,
@@ -476,6 +487,7 @@ func (self *DurationBasedHostAllocator) numNewHostsForDistro(
 		numExistingHosts:     len(existingDistroHosts),
 		totalTasksDuration:   scheduledTasksDuration + runningTasksDuration,
 	}
+	distroScheduleData[distro.Id] = distroData
 
 	cloudManager, err := providers.GetCloudManager(distro.Provider, settings)
 	if err != nil {
@@ -492,9 +504,36 @@ func (self *DurationBasedHostAllocator) numNewHostsForDistro(
 		grip.Error(err)
 		return 0, nil
 	}
+
+	underWaterAlert := message.Fields{
+		"distro":    distro.Id,
+		"runtime":   scheduledTasksDuration + runningTasksDuration,
+		"runner":    RunnerName,
+		"message":   "distro underwater",
+		"num_hosts": existingDistroHosts,
+	}
+
 	if !can {
+		underWaterAlert["action"] = []string{
+			"reduce workload;",
+			"add additional hosts to pool;",
+			"deactivate tasks;",
+		}
+		grip.AlertWhen(time.Duration(distroData.totalTasksDuration/float64(distro.PoolSize)) > staticDistroRuntimeAlertThreshold,
+			underWaterAlert)
+
 		return 0, nil
 	}
+
+	underWaterAlert["max_hosts"] = distro.PoolSize
+	underWaterAlert["actions"] = []string{
+		"provision additional hosts;",
+		"increase maximum pool size;",
+		"reduce workload;",
+		"deactivate tasks;",
+	}
+	grip.AlertWhen(time.Duration(distroData.totalTasksDuration/float64(distro.PoolSize)) > dynamicDistroRuntimeAlertThreshold,
+		underWaterAlert)
 
 	// revise the nominal number of new hosts if needed
 	numNewHosts = orderedScheduleNumNewHosts(distroScheduleData, distro.Id,

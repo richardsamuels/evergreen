@@ -1,10 +1,12 @@
 package client
 
 import (
+	"context"
 	"time"
 
 	"github.com/evergreen-ci/evergreen/apimodels"
 	"github.com/evergreen-ci/evergreen/model"
+	"github.com/evergreen-ci/evergreen/model/admin"
 	"github.com/evergreen-ci/evergreen/model/artifact"
 	"github.com/evergreen-ci/evergreen/model/distro"
 	"github.com/evergreen-ci/evergreen/model/manifest"
@@ -13,7 +15,6 @@ import (
 	"github.com/evergreen-ci/evergreen/model/version"
 	restmodel "github.com/evergreen-ci/evergreen/rest/model"
 	"github.com/mongodb/grip/message"
-	"golang.org/x/net/context"
 )
 
 // Communicator is an interface for communicating with the API server.
@@ -106,7 +107,7 @@ type Communicator interface {
 
 	// Admin methods
 	//
-	SetBannerMessage(context.Context, string) error
+	SetBannerMessage(context.Context, string, admin.BannerTheme) error
 	GetBannerMessage(context.Context) (string, error)
 	SetServiceFlags(context.Context, *restmodel.APIServiceFlags) error
 	GetServiceFlags(context.Context) (*restmodel.APIServiceFlags, error)
@@ -119,4 +120,15 @@ type Communicator interface {
 	//
 	CreateSpawnHost(context.Context, string, string) (*restmodel.APIHost, error)
 	GetHosts(context.Context, func([]*restmodel.APIHost) error) error
+
+	// Fetch list of distributions evergreen can spawn
+	GetDistrosList(context.Context) ([]restmodel.APIDistro, error)
+
+	// Fetch the current authenticated user's public keys
+	GetCurrentUsersKeys(context.Context) ([]restmodel.APIPubKey, error)
+
+	AddPublicKey(context.Context, string, string) error
+
+	// Delete a key with specified name from the current authenticated user
+	DeletePublicKey(context.Context, string) error
 }

@@ -1,6 +1,7 @@
 package route
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,7 +17,6 @@ import (
 	"github.com/evergreen-ci/evergreen/util"
 	"github.com/gorilla/mux"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 const (
@@ -406,11 +406,18 @@ func (trh *taskRestartHandler) ParseAndValidate(ctx context.Context, r *http.Req
 			StatusCode: http.StatusNotFound,
 		}
 	}
-	trh.taskId = projCtx.Task.Id
-	if projCtx.Project == nil {
-		return fmt.Errorf("Unable to fetch associated project")
+	if projCtx.ProjectRef == nil {
+		return rest.APIError{
+			Message:    "Project not found",
+			StatusCode: http.StatusNotFound,
+		}
 	}
-	trh.project = projCtx.Project
+	trh.taskId = projCtx.Task.Id
+	project, err := projCtx.GetProject()
+	if err != nil || project == nil {
+		return errors.Wrap(err, "Unable to fetch associated project")
+	}
+	trh.project = project
 	u := MustHaveUser(ctx)
 	trh.username = u.DisplayName()
 	return nil

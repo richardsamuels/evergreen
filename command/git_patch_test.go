@@ -1,6 +1,7 @@
 package command
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -16,7 +17,6 @@ import (
 	"github.com/evergreen-ci/evergreen/testutil"
 	"github.com/evergreen-ci/evergreen/util"
 	. "github.com/smartystreets/goconvey/convey"
-	"golang.org/x/net/context"
 )
 
 func TestPatchPluginAPI(t *testing.T) {
@@ -93,7 +93,7 @@ func TestPatchPlugin(t *testing.T) {
 	defer cancel()
 	cwd := testutil.GetDirectoryOfFile()
 	testConfig := testutil.TestConfig()
-	db.SetGlobalSessionProvider(db.SessionFactoryFromConfig(testConfig))
+	db.SetGlobalSessionProvider(testConfig.SessionFactory())
 	Convey("With patch plugin installed into plugin registry", t, func() {
 		testutil.HandleTestingErr(db.Clear(version.Collection), t,
 			"unable to clear versions collection")

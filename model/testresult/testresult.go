@@ -2,8 +2,9 @@ package testresult
 
 import (
 	"github.com/evergreen-ci/evergreen/db"
-	"github.com/evergreen-ci/evergreen/db/bsonutil"
-	mgo "gopkg.in/mgo.v2"
+	"github.com/mongodb/anser/bsonutil"
+	"github.com/mongodb/grip"
+	"github.com/pkg/errors"
 	"gopkg.in/mgo.v2/bson"
 )
 
@@ -14,7 +15,7 @@ const (
 
 // TestResult contains test data for a task.
 type TestResult struct {
-	ID        bson.ObjectId `bson:"_id" json:"id"`
+	ID        bson.ObjectId `bson:"_id,omitempty" json:"id"`
 	Status    string        `json:"status" bson:"status"`
 	TestFile  string        `json:"test_file" bson:"test_file"`
 	URL       string        `json:"url" bson:"url,omitempty"`
@@ -48,38 +49,45 @@ var (
 	ExecutionKey = bsonutil.MustHaveTag(TestResult{}, "Execution")
 )
 
-// Insert writes a test result to the database.
-func (t *TestResult) Insert() error {
-	return db.Insert(Collection, t)
-}
-
 // FindByTaskIDAndExecution returns test results from the testresults collection for a given task.
 func FindByTaskIDAndExecution(taskID string, execution int) ([]TestResult, error) {
 	q := db.Query(bson.M{
 		TaskIDKey:    taskID,
 		ExecutionKey: execution,
+	}).Project(bson.M{
+		TaskIDKey:    0,
+		ExecutionKey: 0,
 	})
 	return find(q)
 }
 
-// RemoveByTaskIDAndExecution removes test result from the testresults collection for a given task.
+// InsertByTaskIDAndExecution adds task metadata to a TestResult and then writes it to the database.
+func (t *TestResult) InsertByTaskIDAndExecution(taskID string, execution int) error {
+	if taskID == "" {
+		return errors.New("Cannot insert test result with empty task ID")
+	}
+	t.TaskID = taskID
+	t.Execution = execution
+	return errors.Wrap(t.Insert(), "error inserting test result")
+}
 
-// find returns all test results that satisfy the query.
+// InsertManyByTaskIDAndExecution adds task metadata to many TestResults and writes them to the database.
+func InsertManyByTaskIDAndExecution(testResults []TestResult, taskID string, execution int) error {
+	catcher := grip.NewSimpleCatcher()
+	for _, t := range testResults {
+		catcher.Add(t.InsertByTaskIDAndExecution(taskID, execution))
+	}
+	return catcher.Resolve()
+}
+
+// find returns all test results that satisfy the query. Returns an empty slice no tasks match.
 func find(query db.Q) ([]TestResult, error) {
 	tests := []TestResult{}
 	err := db.FindAllQ(Collection, query, &tests)
-	if err == mgo.ErrNotFound {
-		return nil, nil
-	}
 	return tests, err
 }
 
-// FindOne returns one test result that satisfies the query.
-func findOne(query db.Q) (*TestResult, error) {
-	test := &TestResult{}
-	err := db.FindOneQ(Collection, query, &test)
-	if err == mgo.ErrNotFound {
-		return nil, nil
-	}
-	return test, err
+// Insert writes a test result to the database.
+func (t *TestResult) Insert() error {
+	return db.Insert(Collection, t)
 }

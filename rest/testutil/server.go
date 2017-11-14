@@ -5,13 +5,13 @@ import (
 	"net"
 	"net/http/httptest"
 
-	"github.com/urfave/negroni"
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/db"
 	"github.com/evergreen-ci/evergreen/rest/data"
 	"github.com/evergreen-ci/evergreen/rest/route"
 	"github.com/gorilla/mux"
 	"github.com/mongodb/grip"
+	"github.com/urfave/negroni"
 )
 
 const (
@@ -21,7 +21,7 @@ const (
 // NewTestServerFromSettings takes an evergreen.Settings and creates a database backed
 // REST v2 test server. It automatically starts the server on port 9191.
 func NewTestServerFromSettings(settings *evergreen.Settings) (*httptest.Server, error) {
-	db.SetGlobalSessionProvider(db.SessionFactoryFromConfig(settings))
+	db.SetGlobalSessionProvider(settings.SessionFactory())
 	sc := &data.DBConnector{}
 
 	sc.SetPrefix(evergreen.RestRoutePrefix)

@@ -4,11 +4,20 @@ import (
 	"encoding/json"
 	"io"
 	"io/ioutil"
+	"os"
+	"os/exec"
+	"time"
 
+	"context"
+
+	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/rest/model"
 	"github.com/mongodb/grip"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
+)
+
+const (
+	setupTimeout = 2 * time.Minute
 )
 
 // HostCreateCommand is the subcommand to spawn a host
@@ -146,4 +155,95 @@ func (cmd *HostTerminateCommand) Execute(_ []string) error {
 	grip.Info(body)
 
 	return nil
+}
+
+// HostSetupCommand runs setup.sh to set up a host.
+type HostSetupCommand struct {
+	WorkingDirectory string `long:"working_directory" default:"" description:"working directory"`
+	SetupAsSudo      bool   `long:"setup_as_sudo" description:"run setup script as sudo"`
+}
+
+// Execute runs a script called "setup.sh" in the host's working directory.
+func (c *HostSetupCommand) Execute(_ []string) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	out, err := c.runSetupScript(ctx)
+	if err != nil {
+		return errors.Wrap(err, out)
+	}
+	return nil
+}
+
+func (c *HostSetupCommand) runSetupScript(ctx context.Context) (string, error) {
+	catcher := grip.NewSimpleCatcher()
+	ctx, cancel := context.WithTimeout(ctx, setupTimeout)
+	defer cancel()
+
+	grip.Warning(os.MkdirAll(c.WorkingDirectory, 0777))
+
+	if _, err := os.Stat(evergreen.SetupScriptName); os.IsNotExist(err) {
+		return "", nil
+	}
+
+	chmod := getChmodCommandWithSudo(ctx, evergreen.SetupScriptName, c.SetupAsSudo)
+	out, err := chmod.CombinedOutput()
+	if err != nil {
+		return string(out), err
+	}
+
+	cmd := getShCommandWithSudo(ctx, evergreen.SetupScriptName, c.SetupAsSudo)
+	out, err = cmd.CombinedOutput()
+	catcher.Add(err)
+
+	catcher.Add(os.Remove(evergreen.SetupScriptName))
+	grip.Warning(os.MkdirAll(c.WorkingDirectory, 0777))
+
+	return string(out), catcher.Resolve()
+}
+
+func getShCommandWithSudo(ctx context.Context, script string, sudo bool) *exec.Cmd {
+	if sudo {
+		return exec.CommandContext(ctx, "sudo", "sh", script)
+	}
+	return exec.CommandContext(ctx, "sh", script)
+}
+
+func getChmodCommandWithSudo(ctx context.Context, script string, sudo bool) *exec.Cmd {
+	args := []string{}
+	if sudo {
+		args = append(args, "sudo")
+	}
+	args = append(args, "chmod", "+x", script)
+	return exec.CommandContext(ctx, args[0], args[1:]...)
+}
+
+// HostTeardownCommand runs host teardown script.
+type HostTeardownCommand struct{}
+
+func (c *HostTeardownCommand) Execute(_ []string) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	out, err := c.runTeardownScript(ctx)
+	if err != nil {
+		return errors.Wrap(err, out)
+	}
+	return nil
+}
+
+func (c *HostTeardownCommand) runTeardownScript(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, setupTimeout)
+	defer cancel()
+
+	chmod := getChmodCommandWithSudo(ctx, evergreen.TeardownScriptName, false)
+	out, err := chmod.CombinedOutput()
+	if err != nil {
+		return string(out), err
+	}
+
+	cmd := getShCommandWithSudo(ctx, evergreen.TeardownScriptName, false)
+	out, err = cmd.CombinedOutput()
+
+	return string(out), err
 }

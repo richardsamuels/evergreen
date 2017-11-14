@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -8,12 +9,9 @@ import (
 	"github.com/mongodb/grip/level"
 	"github.com/mongodb/grip/message"
 	"github.com/stretchr/testify/assert"
-	"golang.org/x/net/context"
 )
 
 func TestRestClientLogSenderMessageContents(t *testing.T) {
-	t.Parallel()
-
 	assert := assert.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -41,8 +39,7 @@ func TestRestClientLogSenderMessageContents(t *testing.T) {
 }
 
 func TestRestClientLogSenderDoesNotLogInErrorConditions(t *testing.T) {
-	t.Parallel()
-	assert := assert.New(t)
+	assert := assert.New(t) // nolint
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -63,7 +60,7 @@ func TestRestClientLogSenderDoesNotLogInErrorConditions(t *testing.T) {
 
 func TestLevelConverters(t *testing.T) {
 	t.Parallel()
-	assert := assert.New(t)
+	assert := assert.New(t) // nolint
 
 	assert.Equal("UNKNOWN", priorityToString(level.Invalid))
 	assert.Equal("UNKNOWN", priorityToString(level.Priority(2)))
@@ -80,8 +77,7 @@ func TestLevelConverters(t *testing.T) {
 }
 
 func TestTimeoutLogSender(t *testing.T) {
-	t.Parallel()
-	assert := assert.New(t)
+	assert := assert.New(t) // nolint
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

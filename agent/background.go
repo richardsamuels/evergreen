@@ -1,46 +1,38 @@
 package agent
 
 import (
+	"context"
 	"time"
 
 	"github.com/evergreen-ci/evergreen"
 	"github.com/evergreen-ci/evergreen/rest/client"
 	"github.com/mongodb/grip"
+	"github.com/mongodb/grip/recovery"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 func (a *Agent) startHeartbeat(ctx context.Context, tc *taskContext, heartbeat chan<- string) {
+	defer recovery.LogStackTraceAndContinue("heartbeat background process")
 	heartbeatInterval := defaultHeartbeatInterval
 	if a.opts.HeartbeatInterval != 0 {
 		heartbeatInterval = a.opts.HeartbeatInterval
 	}
+
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
-	failed := 0
+
+	failed, signalBeat := a.doHeartbeat(ctx, tc, 0)
+	if signalBeat != "" {
+		heartbeat <- signalBeat
+		return
+	}
+
 	for {
 		select {
 		case <-ticker.C:
-			abort, err := a.comm.Heartbeat(ctx, tc.task)
-			if abort {
-				grip.Info("Task aborted")
-				heartbeat <- evergreen.TaskUndispatched
-				return
-			}
-			if err != nil {
-				if err.Error() == client.HTTPConflictError {
-					heartbeat <- evergreen.TaskConflict
-					return
-				}
-				failed++
-				grip.Errorf("Error sending heartbeat (%d failed attempts): %s", failed, err)
-			} else {
-				grip.Debug("Sent heartbeat")
-				failed = 0
-			}
-			if failed > maxHeartbeats {
-				grip.Error(errors.New("Exceeded max heartbeats"))
-				heartbeat <- evergreen.TaskFailed
+			failed, signalBeat = a.doHeartbeat(ctx, tc, failed)
+			if signalBeat != "" {
+				heartbeat <- signalBeat
 				return
 			}
 		case <-ctx.Done():
@@ -50,48 +42,66 @@ func (a *Agent) startHeartbeat(ctx context.Context, tc *taskContext, heartbeat c
 	}
 }
 
-func (a *Agent) startIdleTimeoutWatch(ctx context.Context, tc *taskContext, cancel context.CancelFunc) {
-	timeoutInterval := defaultCmdTimeout
-	if a.opts.IdleTimeoutInterval != 0 {
-		timeoutInterval = a.opts.IdleTimeoutInterval
+func (a *Agent) doHeartbeat(ctx context.Context, tc *taskContext, failed int) (int, string) {
+	abort, err := a.comm.Heartbeat(ctx, tc.task)
+	if abort {
+		grip.Info("Task aborted")
+		return failed, evergreen.TaskFailed
+	}
+	if err != nil {
+		if err.Error() == client.HTTPConflictError {
+			return failed, evergreen.TaskConflict
+		}
+		failed++
+		grip.Errorf("Error sending heartbeat (%d failed attempts): %s", failed, err)
+	} else {
+		grip.Debug("Sent heartbeat")
 	}
 
-	timer := time.NewTimer(timeoutInterval)
-	defer timer.Stop()
+	if failed > maxHeartbeats {
+		grip.Error(errors.New("Exceeded max heartbeats"))
+		return failed, evergreen.TaskFailed
+
+	}
+
+	return failed, ""
+}
+
+func (a *Agent) startIdleTimeoutWatch(ctx context.Context, tc *taskContext, cancel context.CancelFunc) {
+	defer recovery.LogStackTraceAndContinue("idle timeout watcher")
+	defer cancel()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			grip.Info("Idle timeout watch canceled context")
+			grip.Info("Idle timeout watch canceled")
 			return
-		case <-timer.C:
-			if taskTimeout := tc.getCurrentTimeout(); taskTimeout != 0 {
-				timeoutInterval = taskTimeout
-			}
+		case <-ticker.C:
+			timeout := tc.getCurrentTimeout()
+			timeSinceLastMessage := time.Since(a.comm.LastMessageAt())
 
-			// check the last time the idle timeout was updated.
-			nextTimeout := timeoutInterval - time.Since(a.comm.LastMessageAt())
-			if nextTimeout <= 0 {
-				tc.logger.Execution().Error("Hit idle timeout")
+			if timeSinceLastMessage > timeout {
+				tc.logger.Execution().Errorf("Hit idle timeout (no message on stdout for more than %s)", timeout)
 				tc.reachTimeOut()
-				cancel()
 				return
 			}
-			timer.Reset(nextTimeout)
 		}
 	}
 }
 
 func (a *Agent) startMaxExecTimeoutWatch(ctx context.Context, tc *taskContext, d time.Duration, cancel context.CancelFunc) {
-	defer cancel()
 	timer := time.NewTimer(d)
+	defer recovery.LogStackTraceAndContinue("exec timeout watcher")
 	defer timer.Stop()
+	defer cancel()
 	for {
 		select {
 		case <-ctx.Done():
 			grip.Info("Exec timeout watch canceled")
 			return
 		case <-timer.C:
-			tc.logger.Execution().Error("Hit exec timeout")
+			tc.logger.Execution().Errorf("Hit exec timeout (%s)", d)
 			tc.reachTimeOut()
 			return
 		}
