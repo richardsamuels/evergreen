@@ -1,6 +1,7 @@
 package patch
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -66,11 +67,13 @@ type githubIntent struct {
 	// MsgId is the unique message id as provided by Github (X-Github-Delivery)
 	MsgID string `bson:"msg_id"`
 
-	// CreatedAt is the time that this intent was stored in the database
-	CreatedAt time.Time `bson:"created_at"`
+	// BaseRepoName is the full repository name, ex: mongodb/mongo, that
+	// this PR will be merged into
+	BaseRepoName string `bson:"base_repo_name"`
 
-	// RepoName is the full repository name, ex: mongodb/mongo
-	RepoName string `bson:"repo_name"`
+	// HeadRepoName is the full repository name that contains the changes
+	// to be merged
+	HeadRepoName string `bson:"head_repo_name"`
 
 	// PRNumber is the pull request number in GitHub.
 	PRNumber int `bson:"pr_number"`
@@ -78,11 +81,15 @@ type githubIntent struct {
 	// User is the login username of the Github user that created the pull request
 	User string `bson:"user"`
 
-	// BaseHash is the base hash of the patch.
-	BaseHash string `bson:"base_hash"`
+	// BaseHash is the head hash of the diff, i.e. hash of the most recent
+	// commit.
+	HeadHash string `bson:"head_hash"`
 
-	// URL is the URL of the url to the patch file for this pull request
-	PatchURL string `bson:"patch_url"`
+	// URL is the URL of the url to the diff file for this pull request
+	DiffURL string `bson:"diff_url"`
+
+	// CreatedAt is the time that this intent was stored in the database
+	CreatedAt time.Time `bson:"created_at"`
 
 	// Processed indicates whether a patch intent has been processed by the amboy queue.
 	Processed bool `bson:"processed"`
@@ -97,26 +104,30 @@ type githubIntent struct {
 // BSON fields for the patches
 // nolint
 var (
-	documentIDKey  = bsonutil.MustHaveTag(githubIntent{}, "DocumentID")
-	msgIDKey       = bsonutil.MustHaveTag(githubIntent{}, "MsgID")
-	createdAtKey   = bsonutil.MustHaveTag(githubIntent{}, "CreatedAt")
-	repoNameKey    = bsonutil.MustHaveTag(githubIntent{}, "RepoName")
-	prNumberKey    = bsonutil.MustHaveTag(githubIntent{}, "PRNumber")
-	userKey        = bsonutil.MustHaveTag(githubIntent{}, "User")
-	baseHashKey    = bsonutil.MustHaveTag(githubIntent{}, "BaseHash")
-	patchURLKey    = bsonutil.MustHaveTag(githubIntent{}, "PatchURL")
-	processedKey   = bsonutil.MustHaveTag(githubIntent{}, "Processed")
-	processedAtKey = bsonutil.MustHaveTag(githubIntent{}, "ProcessedAt")
-	intentTypeKey  = bsonutil.MustHaveTag(githubIntent{}, "IntentType")
+	documentIDKey   = bsonutil.MustHaveTag(githubIntent{}, "DocumentID")
+	msgIDKey        = bsonutil.MustHaveTag(githubIntent{}, "MsgID")
+	createdAtKey    = bsonutil.MustHaveTag(githubIntent{}, "CreatedAt")
+	baseRepoNameKey = bsonutil.MustHaveTag(githubIntent{}, "BaseRepoName")
+	headRepoNameKey = bsonutil.MustHaveTag(githubIntent{}, "HeadRepoName")
+	prNumberKey     = bsonutil.MustHaveTag(githubIntent{}, "PRNumber")
+	userKey         = bsonutil.MustHaveTag(githubIntent{}, "User")
+	headHashKey     = bsonutil.MustHaveTag(githubIntent{}, "HeadHash")
+	diffURLKey      = bsonutil.MustHaveTag(githubIntent{}, "DiffURL")
+	processedKey    = bsonutil.MustHaveTag(githubIntent{}, "Processed")
+	processedAtKey  = bsonutil.MustHaveTag(githubIntent{}, "ProcessedAt")
+	intentTypeKey   = bsonutil.MustHaveTag(githubIntent{}, "IntentType")
 )
 
 // NewGithubIntent return a new github patch intent.
-func NewGithubIntent(msgDeliveryID, repoName string, prNumber int, user, baseHash, url string) (Intent, error) {
+func NewGithubIntent(msgDeliveryID string, prNumber int, baseRepoName, headRepoName, headHash, user, url string) (Intent, error) {
 	if msgDeliveryID == "" {
 		return nil, errors.New("Unique msg id cannot be empty")
 	}
-	if repoName == "" || len(strings.Split(repoName, "/")) != 2 {
-		return nil, errors.New("Repo name is invalid")
+	if baseRepoName == "" || len(strings.Split(baseRepoName, "/")) != 2 {
+		return nil, errors.New("Base repo name is invalid")
+	}
+	if headRepoName == "" || len(strings.Split(headRepoName, "/")) != 2 {
+		return nil, errors.New("Head repo name is invalid")
 	}
 	if prNumber == 0 {
 		return nil, errors.New("PR number must not be 0")
@@ -124,22 +135,26 @@ func NewGithubIntent(msgDeliveryID, repoName string, prNumber int, user, baseHas
 	if user == "" {
 		return nil, errors.New("Github user name must not be empty string")
 	}
-	if len(baseHash) == 0 {
-		return nil, errors.New("Base hash must not be empty")
+	if len(headHash) == 0 {
+		return nil, errors.New("Head hash must not be empty")
 	}
-	if !strings.HasPrefix(url, "http") {
-		return nil, errors.Errorf("URL does not appear valid (%s)", url)
+	if !strings.HasPrefix(url, "https://") {
+		return nil, errors.Errorf("Diff URL must begin with 'https://' (%s)", url)
+	}
+	if !strings.HasSuffix(url, ".diff") {
+		return nil, errors.New("Github patch intents must be created from *.diff files")
 	}
 
 	return &githubIntent{
-		DocumentID: bson.NewObjectId(),
-		MsgID:      msgDeliveryID,
-		RepoName:   repoName,
-		PRNumber:   prNumber,
-		User:       user,
-		BaseHash:   baseHash,
-		PatchURL:   url,
-		IntentType: GithubIntentType,
+		DocumentID:   bson.NewObjectId(),
+		MsgID:        msgDeliveryID,
+		BaseRepoName: baseRepoName,
+		HeadRepoName: headRepoName,
+		PRNumber:     prNumber,
+		User:         user,
+		HeadHash:     headHash,
+		DiffURL:      url,
+		IntentType:   GithubIntentType,
 	}, nil
 }
 
@@ -210,7 +225,25 @@ func FindUnprocessedGithubIntents() ([]*githubIntent, error) {
 }
 
 func (g *githubIntent) NewPatch() *Patch {
-	return nil
+	baseRepo := strings.Split(g.BaseRepoName, "/")
+	headRepo := strings.Split(g.HeadRepoName, "/")
+	patchDoc := &Patch{
+		Id:          bson.NewObjectId(),
+		Description: fmt.Sprintf("%s pull request #%d", g.BaseRepoName, g.PRNumber),
+		Author:      "github_patch_user",
+		Status:      evergreen.PatchCreated,
+		GithubPatchData: GithubPatch{
+			PRNumber:  g.PRNumber,
+			BaseOwner: baseRepo[0],
+			BaseRepo:  baseRepo[1],
+			HeadOwner: headRepo[0],
+			HeadRepo:  headRepo[1],
+			HeadHash:  g.HeadHash,
+			Author:    g.User,
+			DiffURL:   g.DiffURL,
+		},
+	}
+	return patchDoc
 }
 
 func (g *githubIntent) GetAlias() string {

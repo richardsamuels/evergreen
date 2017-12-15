@@ -8,23 +8,26 @@ import (
 	"github.com/evergreen-ci/evergreen/rest"
 	"github.com/evergreen-ci/evergreen/rest/data"
 	"github.com/google/go-github/github"
+	"github.com/mongodb/amboy"
 	"github.com/mongodb/grip"
 )
 
 type githubHookApi struct {
+	queue  amboy.Queue
 	secret []byte
 
 	event interface{}
 	msgId string
 }
 
-func getGithubHooksRouteManager(secret []byte) routeManagerFactory {
+func getGithubHooksRouteManager(queue amboy.Queue, secret []byte) routeManagerFactory {
 	return func(route string, version int) *RouteManager {
 		methods := []MethodHandler{}
 		if len(secret) > 0 {
 			methods = append(methods, MethodHandler{
 				Authenticator: &NoAuthAuthenticator{},
 				RequestHandler: &githubHookApi{
+					queue:  queue,
 					secret: secret,
 				},
 				MethodType: http.MethodPost,
@@ -44,6 +47,7 @@ func getGithubHooksRouteManager(secret []byte) routeManagerFactory {
 
 func (gh *githubHookApi) Handler() RequestHandler {
 	return &githubHookApi{
+		queue:  gh.queue,
 		secret: gh.secret,
 	}
 }
@@ -52,7 +56,7 @@ func (gh *githubHookApi) ParseAndValidate(ctx context.Context, r *http.Request) 
 	eventType := r.Header.Get("X-Github-Event")
 	gh.msgId = r.Header.Get("X-Github-Delivery")
 
-	if len(gh.secret) == 0 {
+	if len(gh.secret) == 0 || gh.queue == nil {
 		return rest.APIError{
 			StatusCode: http.StatusInternalServerError,
 		}
@@ -99,7 +103,13 @@ func (gh *githubHookApi) Execute(ctx context.Context, sc data.Connector) (Respon
 
 		}
 		if *event.Action == "opened" || *event.Action == "synchronize" {
-			ghi, err := patch.NewGithubIntent(gh.msgId, *event.Repo.FullName, *event.Number, *event.Sender.Login, *event.PullRequest.Base.SHA, *event.PullRequest.PatchURL)
+			ghi, err := patch.NewGithubIntent(gh.msgId,
+				*event.Number,
+				*event.Repo.FullName,
+				*event.PullRequest.Head.Repo.FullName,
+				*event.PullRequest.Head.SHA,
+				*event.Sender.Login,
+				*event.PullRequest.DiffURL)
 			if err != nil {
 				return ResponseData{}, rest.APIError{
 					StatusCode: http.StatusBadRequest,
@@ -107,7 +117,7 @@ func (gh *githubHookApi) Execute(ctx context.Context, sc data.Connector) (Respon
 				}
 			}
 
-			if err := sc.AddPatchIntent(ghi); err != nil {
+			if err := sc.AddPatchIntent(ghi, gh.queue); err != nil {
 				return ResponseData{}, rest.APIError{
 					StatusCode: http.StatusInternalServerError,
 					Message:    err.Error(),
@@ -123,8 +133,9 @@ func validatePullRequestEvent(event *github.PullRequestEvent) bool {
 	if event.Action == nil || event.Number == nil ||
 		event.Repo == nil || event.Repo.FullName == nil ||
 		event.Sender == nil || event.Sender.Login == nil ||
-		event.PullRequest == nil || event.PullRequest.PatchURL == nil ||
-		event.PullRequest.Base == nil || event.PullRequest.Base.SHA == nil {
+		event.PullRequest == nil || event.PullRequest.DiffURL == nil ||
+		event.PullRequest.Head == nil || event.PullRequest.Head.SHA == nil ||
+		event.PullRequest.Head.Repo == nil || event.PullRequest.Head.Repo.FullName == nil {
 		return false
 	}
 
