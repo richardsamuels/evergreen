@@ -87,16 +87,13 @@ class JiraLink extends React.Component {
 
 // The Root class renders all components on the waterfall page, including the grid view and the filter and new page buttons
 // The one exception is the header, which is written in Angular and managed by menu.html
-class Root extends React.Component{
+class Root extends React.PureComponent{
   constructor(props){
     super(props);
 
-    this.updatePaginationContext(window.serverData)
-   
     const href = window.location.href
     var buildVariantFilter = getParameterByName('bv_filter', href) || ''
     var taskFilter = getParameterByName('task_filter', href) || ''
-
     var collapsed = localStorage.getItem("collapsed") == "true";
 
     this.state = {
@@ -104,8 +101,10 @@ class Root extends React.Component{
       shortenCommitMessage: true,
       buildVariantFilter: buildVariantFilter,
       taskFilter: taskFilter,
-      data: this.props.data,
+      data: null
     }
+    this.baseURL = "/waterfall/" + this.props.project;
+    this.loadDataPortion(false);
 
     // Handle state for a collapsed view, as well as shortened header commit messages
     this.handleCollapseChange = this.handleCollapseChange.bind(this);
@@ -139,10 +138,11 @@ class Root extends React.Component{
     var params = filter ? {bv_filter: filter} : {}
     http.get(`/rest/v1/waterfall/${this.props.project}`, {params})
       .then(({data}) => {
+        console.log(data);
         this.updatePaginationContext(data)
         this.setState({data})
         updateURLParams(filter, this.state.taskFilter, this.currentSkip, this.baseURL);
-      })
+      });
   }
 
   handleCollapseChange(collapsed) {
@@ -166,6 +166,14 @@ class Root extends React.Component{
   }
 
   render() {
+    console.log(this.state.data);
+    if (!this.state.data) {
+      return (
+        <div>
+          Loading waterfall...
+        </div>
+      );
+    }
     if (this.state.data.rows.length == 0){
       return (
         <div> 

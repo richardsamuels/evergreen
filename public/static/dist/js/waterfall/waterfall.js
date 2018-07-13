@@ -107,20 +107,17 @@ var JiraLink = function (_React$Component) {
 // The one exception is the header, which is written in Angular and managed by menu.html
 
 
-var Root = function (_React$Component2) {
-  _inherits(Root, _React$Component2);
+var Root = function (_React$PureComponent) {
+  _inherits(Root, _React$PureComponent);
 
   function Root(props) {
     _classCallCheck(this, Root);
 
     var _this2 = _possibleConstructorReturn(this, (Root.__proto__ || Object.getPrototypeOf(Root)).call(this, props));
 
-    _this2.updatePaginationContext(window.serverData);
-
     var href = window.location.href;
     var buildVariantFilter = getParameterByName('bv_filter', href) || '';
     var taskFilter = getParameterByName('task_filter', href) || '';
-
     var collapsed = localStorage.getItem("collapsed") == "true";
 
     _this2.state = {
@@ -128,10 +125,13 @@ var Root = function (_React$Component2) {
       shortenCommitMessage: true,
       buildVariantFilter: buildVariantFilter,
       taskFilter: taskFilter,
-      data: _this2.props.data
+      data: null
+    };
+    _this2.baseURL = "/waterfall/" + _this2.props.project;
+    _this2.loadDataPortion(false);
 
-      // Handle state for a collapsed view, as well as shortened header commit messages
-    };_this2.handleCollapseChange = _this2.handleCollapseChange.bind(_this2);
+    // Handle state for a collapsed view, as well as shortened header commit messages
+    _this2.handleCollapseChange = _this2.handleCollapseChange.bind(_this2);
     _this2.handleHeaderLinkClick = _this2.handleHeaderLinkClick.bind(_this2);
     _this2.handleBuildVariantFilter = _this2.handleBuildVariantFilter.bind(_this2);
     _this2.handleTaskFilter = _this2.handleTaskFilter.bind(_this2);
@@ -169,6 +169,7 @@ var Root = function (_React$Component2) {
       http.get("/rest/v1/waterfall/" + this.props.project, { params: params }).then(function (_ref) {
         var data = _ref.data;
 
+        console.log(data);
         _this3.updatePaginationContext(data);
         _this3.setState({ data: data });
         updateURLParams(filter, _this3.state.taskFilter, _this3.currentSkip, _this3.baseURL);
@@ -201,6 +202,14 @@ var Root = function (_React$Component2) {
   }, {
     key: "render",
     value: function render() {
+      console.log(this.state.data);
+      if (!this.state.data) {
+        return React.createElement(
+          "div",
+          null,
+          "Loading waterfall..."
+        );
+      }
       if (this.state.data.rows.length == 0) {
         return React.createElement(
           "div",
@@ -245,7 +254,7 @@ var Root = function (_React$Component2) {
   }]);
 
   return Root;
-}(React.Component);
+}(React.PureComponent);
 
 // Toolbar
 
@@ -350,8 +359,8 @@ function PageButton(_ref4) {
   );
 }
 
-var FilterBox = function (_React$Component3) {
-  _inherits(FilterBox, _React$Component3);
+var FilterBox = function (_React$Component2) {
+  _inherits(FilterBox, _React$Component2);
 
   function FilterBox(props) {
     _classCallCheck(this, FilterBox);
@@ -381,8 +390,8 @@ var FilterBox = function (_React$Component3) {
   return FilterBox;
 }(React.Component);
 
-var CollapseButton = function (_React$Component4) {
-  _inherits(CollapseButton, _React$Component4);
+var CollapseButton = function (_React$Component3) {
+  _inherits(CollapseButton, _React$Component3);
 
   function CollapseButton(props) {
     _classCallCheck(this, CollapseButton);
@@ -533,8 +542,8 @@ function ActiveVersionHeader(_ref6) {
   );
 };
 
-var HideHeaderButton = function (_React$Component5) {
-  _inherits(HideHeaderButton, _React$Component5);
+var HideHeaderButton = function (_React$Component4) {
+  _inherits(HideHeaderButton, _React$Component4);
 
   function HideHeaderButton(props) {
     _classCallCheck(this, HideHeaderButton);
